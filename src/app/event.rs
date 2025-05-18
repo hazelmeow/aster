@@ -19,10 +19,10 @@ pub(crate) static GLOBAL_SENDER: OnceCell<mpsc::UnboundedSender<Event>> = OnceCe
 /// Must be called after creating an App.
 macro_rules! app_send {
     ($e:expr) => {{
-        let _ = crate::event::GLOBAL_SENDER
+        let _ = crate::app::event::GLOBAL_SENDER
             .get()
             .expect("app_send called before app was initialized")
-            .send(crate::event::Event::App($e));
+            .send(crate::app::event::Event::App($e));
     }};
 }
 pub(crate) use app_send;

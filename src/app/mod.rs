@@ -1,16 +1,18 @@
+pub(crate) mod event;
+pub(crate) mod ui;
+
 use crate::{
-    event::{Event, EventHandler, app_send},
+    app::event::{Event, EventHandler, app_send},
     profile::Profile,
-    proto::{self, Proto},
+    proto::Proto,
 };
 use anyhow::Context;
-use iroh::{Endpoint, NodeAddr, SecretKey, endpoint, protocol::Router};
+use iroh::{NodeAddr, protocol::Router};
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
 };
 use std::sync::Arc;
-use tokio::sync::{OnceCell, mpsc};
 use tui_widgets::prompts::{State, Status, TextState};
 
 /// Application.
@@ -50,7 +52,7 @@ pub enum AppEvent {
 
 macro_rules! app_log {
     ($($arg:tt)*) => {
-        let _ = crate::event::app_send!(crate::app::AppEvent::Log(format!($($arg)*)));
+        let _ = crate::app::event::app_send!(crate::app::AppEvent::Log(format!($($arg)*)));
     };
 }
 pub(crate) use app_log;

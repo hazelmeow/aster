@@ -1,8 +1,6 @@
 mod app;
-mod event;
 mod profile;
 mod proto;
-mod ui;
 
 use crate::app::{App, AppLogger};
 
