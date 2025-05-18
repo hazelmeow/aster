@@ -4,3 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.98"
+crossterm = { version = "0.28.1", features = ["event-stream"] }
+env_filter = "0.1.3"
+futures = "0.3.31"
+iroh = "0.34.1"
+iroh-base = "0.34.1"
+log = "0.4.27"
+n0-future = "0.1.2"
+rand = "0.8.5"
+ratatui = "0.29.0"
+tokio = "1.44.2"
+tui-widgets = "0.4.1"
