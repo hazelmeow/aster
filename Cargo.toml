@@ -12,7 +12,12 @@ iroh = "0.34.1"
 iroh-base = "0.34.1"
 log = "0.4.27"
 n0-future = "0.1.2"
+postcard = "1.1.1"
 rand = "0.8.5"
 ratatui = "0.29.0"
+serde = { version = "1.0.219", features = ["derive"] }
 tokio = "1.44.2"
 tui-widgets = "0.4.1"
+
+[dev-dependencies]
+arbtest = "0.3.2"

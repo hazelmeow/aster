@@ -1,5 +1,9 @@
 //! The app protocol.
 
+mod acb;
+mod clock;
+mod dgm;
+
 use crate::app::app_log;
 
 #[derive(Debug, Clone)]
