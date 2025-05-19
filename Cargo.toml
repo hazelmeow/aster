@@ -17,6 +17,7 @@ rand = "0.8.5"
 ratatui = "0.29.0"
 serde = { version = "1.0.219", features = ["derive"] }
 tokio = "1.44.2"
+tokio-util = "0.7.15"
 tui-widgets = "0.4.1"
 
 [dev-dependencies]

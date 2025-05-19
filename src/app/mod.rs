@@ -7,7 +7,7 @@ use crate::{
     proto::Proto,
 };
 use anyhow::Context;
-use iroh::{NodeAddr, protocol::Router};
+use iroh::{NodeAddr, NodeId, protocol::Router};
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -30,6 +30,15 @@ pub struct App<'a> {
     pub messages: Vec<String>,
 
     pub command_state: TextState<'a>,
+    pub proto_state: ProtoState,
+}
+
+/// View of protocol state for UI.
+///
+/// Polled periodically since we can't lock the state mutices during rendering.
+#[derive(Debug, Clone, Default)]
+pub struct ProtoState {
+    peers: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +56,7 @@ pub enum AppEvent {
     Exit,
     CommandMode,
     ExitMode,
+    PollProtoState(ProtoState),
     Log(String),
 }
 
@@ -80,8 +90,9 @@ impl<'a> App<'a> {
         }
 
         // spawn router accepting protocol connections
+        let proto = Proto::new();
         let router = iroh::protocol::Router::builder(endpoint)
-            .accept(Proto::ALPN, Proto)
+            .accept(Proto::ALPN, proto.clone())
             .spawn()
             .await?;
 
@@ -93,13 +104,14 @@ impl<'a> App<'a> {
 
             profile,
             router: Arc::new(router),
-            proto: Proto,
+            proto,
 
             mode: AppMode::Default,
 
             messages: Vec::new(),
 
             command_state: TextState::default(),
+            proto_state: ProtoState::default(),
         })
     }
 
@@ -170,7 +182,18 @@ impl<'a> App<'a> {
     ///
     /// The tick event is where you can update the state of your application with any logic that
     /// needs to be updated at a fixed frame rate. E.g. polling a server, updating an animation.
-    pub fn tick(&self) {}
+    pub fn tick(&self) {
+        let proto = self.proto.clone();
+        tokio::spawn(async move {
+            let peers = proto.peers().lock().await;
+
+            let peers = peers.keys().copied().collect::<Vec<_>>();
+
+            let proto_state = ProtoState { peers };
+
+            app_send!(AppEvent::PollProtoState(proto_state));
+        });
+    }
 
     pub fn handle_app_events(&mut self, app_event: AppEvent) -> anyhow::Result<()> {
         match app_event {
@@ -184,6 +207,7 @@ impl<'a> App<'a> {
                 self.mode = AppMode::Default;
                 self.command_state = TextState::default();
             }
+            AppEvent::PollProtoState(state) => self.proto_state = state,
             AppEvent::Log(s) => self.messages.push(s),
         }
         Ok(())
@@ -196,17 +220,36 @@ impl<'a> App<'a> {
             "q" => self.events.send(AppEvent::Shutdown),
 
             "c" => {
-                if parts.len() != 3 {
-                    anyhow::bail!("expected 3 arguments");
+                if parts.len() != 2 {
+                    anyhow::bail!("expected 1 argument");
                 }
 
                 app_log!("connecting to {}", parts[1]);
 
                 let addr = NodeAddr::new(parts[1].parse().context("failed to parse node id")?);
+                let proto = self.proto.clone();
                 let router = self.router.clone();
-                let message = parts[2].to_string();
+
                 tokio::spawn(async move {
-                    Self::connect_side(router, addr, &message).await.unwrap();
+                    proto.connect(router.endpoint(), addr).await.unwrap();
+                });
+            }
+
+            "b" => {
+                if parts.len() != 2 {
+                    anyhow::bail!("expected 1 argument");
+                }
+
+                app_log!("broadcasting '{}'", parts[1]);
+
+                let proto = self.proto.clone();
+                let msg = parts[1].to_string();
+                tokio::spawn(async move {
+                    let peers = proto.peers().clone();
+                    let peers = peers.lock().await;
+                    for (id, peer) in peers.iter() {
+                        peer.send(crate::proto::Message::Text(msg.clone()))
+                    }
                 });
             }
 
@@ -214,37 +257,6 @@ impl<'a> App<'a> {
                 anyhow::bail!("unknown command: {command}");
             }
         }
-        Ok(())
-    }
-
-    async fn connect_side(
-        router: Arc<Router>,
-        addr: NodeAddr,
-        message: &str,
-    ) -> anyhow::Result<()> {
-        app_log!("sending '{message}' to {addr:?}");
-
-        // Open a connection to the accepting node
-        let conn = router.endpoint().connect(addr, Proto::ALPN).await?;
-
-        // Open a bidirectional QUIC stream
-        let (mut send, mut recv) = conn.open_bi().await?;
-
-        // Send some data to be echoed
-        send.write_all(message.as_bytes()).await?;
-
-        // Signal the end of data for this particular stream
-        send.finish()?;
-
-        // Receive the echo, but limit reading up to maximum 1000 bytes
-        let response = recv.read_to_end(1000).await?;
-        // assert_eq!(&response, b"Hello, world!");
-
-        // Explicitly close the whole connection.
-        conn.close(0u32.into(), b"bye!");
-
-        app_log!("connection closed");
-
         Ok(())
     }
 

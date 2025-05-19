@@ -56,6 +56,14 @@ impl<'a> App<'a> {
             .get()
             .map_or("...".into(), |r| r.map_or("None".into(), |r| r.to_string()));
 
+        let peers = self
+            .proto_state
+            .peers
+            .iter()
+            .map(|k| k.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+
         let status_text = Text::from(vec![
             Line::from(vec![
                 "Profile: ".into(),
@@ -66,6 +74,8 @@ impl<'a> App<'a> {
                 self.router.endpoint().node_id().to_string().yellow(),
             ]),
             Line::from(vec!["Home Relay: ".into(), home_relay.yellow()]),
+            Line::from(""),
+            Line::from(vec!["Peers: ".into(), peers.yellow()]),
         ]);
 
         Paragraph::new(status_text)
