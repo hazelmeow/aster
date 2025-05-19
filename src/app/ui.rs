@@ -76,6 +76,10 @@ impl<'a> App<'a> {
             Line::from(vec!["Home Relay: ".into(), home_relay.yellow()]),
             Line::from(""),
             Line::from(vec!["Peers: ".into(), peers.yellow()]),
+            Line::from(vec![
+                "Join Code: ".into(),
+                self.proto_state.join_code.clone().yellow(),
+            ]),
         ]);
 
         Paragraph::new(status_text)

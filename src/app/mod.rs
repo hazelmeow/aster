@@ -4,7 +4,7 @@ pub(crate) mod ui;
 use crate::{
     app::event::{Event, EventHandler, app_send},
     profile::Profile,
-    proto::Proto,
+    proto::{Proto, join::JoinProtocol},
 };
 use anyhow::Context;
 use iroh::{NodeAddr, NodeId, protocol::Router};
@@ -24,6 +24,7 @@ pub struct App<'a> {
     pub profile: Profile,
     pub router: Arc<Router>,
     pub proto: Proto,
+    pub join_protocol: JoinProtocol,
 
     pub mode: AppMode,
 
@@ -39,6 +40,7 @@ pub struct App<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct ProtoState {
     peers: Vec<NodeId>,
+    join_code: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,8 +93,10 @@ impl<'a> App<'a> {
 
         // spawn router accepting protocol connections
         let proto = Proto::new();
+        let join_protocol = JoinProtocol::new();
         let router = iroh::protocol::Router::builder(endpoint)
             .accept(Proto::ALPN, proto.clone())
+            .accept(JoinProtocol::ALPN, join_protocol.clone())
             .spawn()
             .await?;
 
@@ -105,6 +109,7 @@ impl<'a> App<'a> {
             profile,
             router: Arc::new(router),
             proto,
+            join_protocol,
 
             mode: AppMode::Default,
 
@@ -184,12 +189,16 @@ impl<'a> App<'a> {
     /// needs to be updated at a fixed frame rate. E.g. polling a server, updating an animation.
     pub fn tick(&self) {
         let proto = self.proto.clone();
+        let join_protocol = self.join_protocol.clone();
         tokio::spawn(async move {
-            let peers = proto.peers().lock().await;
+            let peers = {
+                let peers = proto.peers().lock().await;
+                peers.keys().copied().collect::<Vec<_>>()
+            };
 
-            let peers = peers.keys().copied().collect::<Vec<_>>();
+            let join_code = join_protocol.get_code().await;
 
-            let proto_state = ProtoState { peers };
+            let proto_state = ProtoState { peers, join_code };
 
             app_send!(AppEvent::PollProtoState(proto_state));
         });
@@ -251,6 +260,32 @@ impl<'a> App<'a> {
                         peer.send(crate::proto::Message::Text(msg.clone()))
                     }
                 });
+            }
+
+            "j" => {
+                if parts.len() != 3 {
+                    anyhow::bail!("expected 2 arguments");
+                }
+
+                app_log!("joining {} with code {}", parts[1], parts[2]);
+
+                let addr = NodeAddr::new(parts[1].parse().context("failed to parse node id")?);
+                let code = parts[2].to_string();
+
+                let join_protocol = self.join_protocol.clone();
+                let router = self.router.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = join_protocol.join(router.endpoint(), addr, code).await {
+                        app_log!("join failed: {e:#}");
+                    } else {
+                        app_log!("join success");
+                    }
+                });
+            }
+
+            "d" => {
+                // app_log!("app: {:?}", self);
+                app_log!("proto_state: {:?}", self.proto_state);
             }
 
             _ => {

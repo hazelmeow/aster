@@ -3,6 +3,7 @@
 mod acb;
 mod clock;
 mod dgm;
+pub(crate) mod join;
 
 use crate::app::app_log;
 use iroh::{
