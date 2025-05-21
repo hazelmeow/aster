@@ -8,7 +8,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-use crate::app::app_log;
+use crate::app::{AppEvent, app_log, event::app_send};
 
 const CODE_TTL: Duration = Duration::from_secs(60 * 2);
 const EXPIRES_SOON_THRESHOLD: Duration = Duration::from_secs(60);
@@ -36,6 +36,7 @@ impl TryFrom<u8> for Response {
     }
 }
 
+// TODO: encode as local node id + random code, then to some string
 #[derive(Debug)]
 struct Code {
     code: String,
@@ -194,7 +195,8 @@ impl iroh::protocol::ProtocolHandler for JoinProtocol {
                             .write_all(&[Response::ErrorExpired as u8])
                             .await?;
                     } else {
-                        // TODO: connect to group membership
+                        // tell protocol to add user to grup
+                        app_send!(AppEvent::AddMember(node_id));
 
                         app_log!(
                             "[proto/join] peer {node_id} joined using code {}",

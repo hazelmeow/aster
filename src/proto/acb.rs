@@ -11,7 +11,7 @@ pub struct Message<P> {
     pub payload: P,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignedMessage<P> {
     pub inner: Message<P>,
     pub public_key: PublicKey,

@@ -6,12 +6,17 @@ mod dgm;
 pub(crate) mod join;
 
 use crate::app::app_log;
+use acb::SignedMessage;
+use dgm::{GroupMembership, Operation};
 use iroh::{
-    Endpoint, NodeAddr, NodeId,
+    Endpoint, NodeAddr, NodeId, SecretKey,
     endpoint::{RecvStream, SendStream},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +25,12 @@ pub enum Message {
     Ping(u32),
     Pong(u32),
     Text(String),
+    Welcome {
+        messages: Vec<SignedMessage<Operation>>,
+    },
+    Sync {
+        messages: Vec<SignedMessage<Operation>>,
+    },
 }
 
 #[derive(Debug)]
@@ -35,9 +46,10 @@ impl Peer {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Proto {
     peers: Arc<Mutex<HashMap<NodeId, Peer>>>,
+    dgm: Mutex<Option<GroupMembership>>,
 }
 
 impl Proto {
@@ -46,6 +58,7 @@ impl Proto {
     pub fn new() -> Self {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
+            dgm: Mutex::new(None),
         }
     }
 
@@ -99,8 +112,32 @@ impl Proto {
         Ok(())
     }
 
+    pub async fn create_group(&self, secret_key: SecretKey) -> anyhow::Result<()> {
+        let mut dgm = self.dgm.lock().await;
+        if dgm.is_some() {
+            anyhow::bail!("already in a group");
+        }
+
+        dgm.replace(GroupMembership::new(secret_key));
+
+        Ok(())
+    }
+
+    pub async fn add_group_member(&self, node_id: NodeId) -> anyhow::Result<()> {
+        let mut dgm = self.dgm.lock().await;
+        let dgm = dgm.as_mut().ok_or(anyhow::anyhow!("not in a group"))?;
+        dgm.add_member(node_id);
+        Ok(())
+    }
+
     pub fn peers(&self) -> &Arc<Mutex<HashMap<NodeId, Peer>>> {
         &self.peers
+    }
+
+    pub async fn dgm_state(&self) -> Option<(u64, HashSet<NodeId>)> {
+        let dgm = self.dgm.lock().await;
+        dgm.as_ref()
+            .map(|dgm| (dgm.group_id(), dgm.evaluate_members()))
     }
 }
 

@@ -64,7 +64,7 @@ impl<'a> App<'a> {
             .collect::<Vec<_>>()
             .join(",");
 
-        let status_text = Text::from(vec![
+        let mut lines = vec![
             Line::from(vec![
                 "Profile: ".into(),
                 self.profile.name().unwrap_or("None").yellow(),
@@ -80,7 +80,26 @@ impl<'a> App<'a> {
                 "Join Code: ".into(),
                 self.proto_state.join_code.clone().yellow(),
             ]),
-        ]);
+        ];
+
+        match (&self.proto_state.group_id, &self.proto_state.group_members) {
+            (Some(group_id), Some(group_members)) => {
+                let group_members = group_members
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+
+                lines.extend_from_slice(&[
+                    Line::from(""),
+                    Line::from(vec!["Group ID: ".into(), group_id.to_string().yellow()]),
+                    Line::from(vec!["Group Members: ".into(), group_members.yellow()]),
+                ]);
+            }
+            _ => {}
+        }
+
+        let status_text = Text::from(lines);
 
         Paragraph::new(status_text)
             .block(block)

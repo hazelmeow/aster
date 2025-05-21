@@ -12,7 +12,7 @@ use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
 };
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use tui_widgets::prompts::{State, Status, TextState};
 
 /// Application.
@@ -23,7 +23,7 @@ pub struct App<'a> {
 
     pub profile: Profile,
     pub router: Arc<Router>,
-    pub proto: Proto,
+    pub proto: Arc<Proto>,
     pub join_protocol: JoinProtocol,
 
     pub mode: AppMode,
@@ -41,6 +41,8 @@ pub struct App<'a> {
 pub struct ProtoState {
     peers: Vec<NodeId>,
     join_code: String,
+    group_id: Option<u64>,
+    group_members: Option<HashSet<NodeId>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,12 +56,17 @@ pub enum AppMode {
 /// You can extend this enum with your own custom events.
 #[derive(Clone, Debug)]
 pub enum AppEvent {
+    Log(String),
+
     Shutdown,
     Exit,
+
     CommandMode,
     ExitMode,
+
     PollProtoState(ProtoState),
-    Log(String),
+
+    AddMember(NodeId),
 }
 
 macro_rules! app_log {
@@ -92,7 +99,7 @@ impl<'a> App<'a> {
         }
 
         // spawn router accepting protocol connections
-        let proto = Proto::new();
+        let proto = Arc::new(Proto::new());
         let join_protocol = JoinProtocol::new();
         let router = iroh::protocol::Router::builder(endpoint)
             .accept(Proto::ALPN, proto.clone())
@@ -198,7 +205,17 @@ impl<'a> App<'a> {
 
             let join_code = join_protocol.get_code().await;
 
-            let proto_state = ProtoState { peers, join_code };
+            let (group_id, group_members) = {
+                let dgm_state = proto.dgm_state().await;
+                (dgm_state.as_ref().map(|s| s.0), dgm_state.map(|s| s.1))
+            };
+
+            let proto_state = ProtoState {
+                peers,
+                join_code,
+                group_id,
+                group_members,
+            };
 
             app_send!(AppEvent::PollProtoState(proto_state));
         });
@@ -206,8 +223,11 @@ impl<'a> App<'a> {
 
     pub fn handle_app_events(&mut self, app_event: AppEvent) -> anyhow::Result<()> {
         match app_event {
+            AppEvent::Log(s) => self.messages.push(s),
+
             AppEvent::Shutdown => self.shutdown(),
             AppEvent::Exit => self.exit(),
+
             AppEvent::CommandMode => {
                 self.mode = AppMode::Command;
                 self.command_state.focus();
@@ -216,8 +236,19 @@ impl<'a> App<'a> {
                 self.mode = AppMode::Default;
                 self.command_state = TextState::default();
             }
+
             AppEvent::PollProtoState(state) => self.proto_state = state,
-            AppEvent::Log(s) => self.messages.push(s),
+
+            AppEvent::AddMember(id) => {
+                let proto = self.proto.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = proto.add_group_member(id).await {
+                        app_log!("error handling AddMember: {e:#}");
+                    } else {
+                        app_log!("handled AddMember");
+                    }
+                });
+            }
         }
         Ok(())
     }
@@ -258,6 +289,20 @@ impl<'a> App<'a> {
                     let peers = peers.lock().await;
                     for (id, peer) in peers.iter() {
                         peer.send(crate::proto::Message::Text(msg.clone()))
+                    }
+                });
+            }
+
+            "cg" => {
+                app_log!("creating group");
+
+                let proto = self.proto.clone();
+                let secret_key = self.router.endpoint().secret_key().clone();
+                tokio::spawn(async move {
+                    if let Err(e) = proto.create_group(secret_key).await {
+                        app_log!("create group failed: {e:#}");
+                    } else {
+                        app_log!("create group success");
                     }
                 });
             }
