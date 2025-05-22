@@ -50,6 +50,7 @@ impl<'a> App<'a> {
             .border_set(border::THICK);
 
         let home_relay = self
+            .protocol
             .router
             .endpoint()
             .home_relay()
@@ -57,7 +58,7 @@ impl<'a> App<'a> {
             .map_or("...".into(), |r| r.map_or("None".into(), |r| r.to_string()));
 
         let peers = self
-            .proto_state
+            .protocol_state
             .peers
             .iter()
             .map(|k| k.to_string())
@@ -71,18 +72,26 @@ impl<'a> App<'a> {
             ]),
             Line::from(vec![
                 "Node ID: ".into(),
-                self.router.endpoint().node_id().to_string().yellow(),
+                self.protocol
+                    .router
+                    .endpoint()
+                    .node_id()
+                    .to_string()
+                    .yellow(),
             ]),
             Line::from(vec!["Home Relay: ".into(), home_relay.yellow()]),
             Line::from(""),
             Line::from(vec!["Peers: ".into(), peers.yellow()]),
             Line::from(vec![
                 "Join Code: ".into(),
-                self.proto_state.join_code.clone().yellow(),
+                self.protocol_state.join_code.clone().yellow(),
             ]),
         ];
 
-        match (&self.proto_state.group_id, &self.proto_state.group_members) {
+        match (
+            &self.protocol_state.group_id,
+            &self.protocol_state.group_members,
+        ) {
             (Some(group_id), Some(group_members)) => {
                 let group_members = group_members
                     .iter()

@@ -4,7 +4,7 @@ pub(crate) mod ui;
 use crate::{
     app::event::{Event, EventHandler, app_send},
     profile::Profile,
-    proto::{Proto, join::JoinProtocol},
+    proto::{Protocol, ProtocolState, join::JoinProtocol},
 };
 use anyhow::Context;
 use iroh::{NodeAddr, NodeId, protocol::Router};
@@ -22,27 +22,14 @@ pub struct App<'a> {
     pub events: EventHandler,
 
     pub profile: Profile,
-    pub router: Arc<Router>,
-    pub proto: Arc<Proto>,
-    pub join_protocol: JoinProtocol,
+    pub protocol: Arc<Protocol>,
 
     pub mode: AppMode,
 
     pub messages: Vec<String>,
 
     pub command_state: TextState<'a>,
-    pub proto_state: ProtoState,
-}
-
-/// View of protocol state for UI.
-///
-/// Polled periodically since we can't lock the state mutices during rendering.
-#[derive(Debug, Clone, Default)]
-pub struct ProtoState {
-    peers: Vec<NodeId>,
-    join_code: String,
-    group_id: Option<u64>,
-    group_members: Option<HashSet<NodeId>>,
+    pub protocol_state: ProtocolState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,13 +45,12 @@ pub enum AppMode {
 pub enum AppEvent {
     Log(String),
 
-    Shutdown,
     Exit,
 
     CommandMode,
     ExitMode,
 
-    PollProtoState(ProtoState),
+    PollProtocolState(ProtocolState),
 
     AddMember(NodeId),
 }
@@ -86,26 +72,13 @@ impl<'a> App<'a> {
             Profile::new(None)
         };
 
-        // create iroh endpoint
-        let endpoint = iroh::Endpoint::builder()
-            .discovery_n0()
-            .secret_key(profile.secret_key().clone())
-            .bind()
-            .await?;
-
+        // TODO
         // save profile if named but not previously found
-        if profile_name.is_some() {
-            profile.save().await?;
-        }
+        // if profile_name.is_some() {
+        // profile.save().await?;
+        // }
 
-        // spawn router accepting protocol connections
-        let proto = Arc::new(Proto::new());
-        let join_protocol = JoinProtocol::new();
-        let router = iroh::protocol::Router::builder(endpoint)
-            .accept(Proto::ALPN, proto.clone())
-            .accept(JoinProtocol::ALPN, join_protocol.clone())
-            .spawn()
-            .await?;
+        let protocol = Arc::new(Protocol::new(&profile).await?);
 
         let events = EventHandler::new();
 
@@ -114,16 +87,14 @@ impl<'a> App<'a> {
             events,
 
             profile,
-            router: Arc::new(router),
-            proto,
-            join_protocol,
+            protocol,
 
             mode: AppMode::Default,
 
             messages: Vec::new(),
 
             command_state: TextState::default(),
-            proto_state: ProtoState::default(),
+            protocol_state: ProtocolState::default(),
         })
     }
 
@@ -143,7 +114,8 @@ impl<'a> App<'a> {
             }
         }
 
-        self.router.shutdown().await?;
+        // shut down protocol
+        self.protocol.shutdown().await?;
 
         Ok(())
     }
@@ -158,13 +130,13 @@ impl<'a> App<'a> {
 
             // esc or q to quit
             (AppMode::Default, KeyCode::Esc | KeyCode::Char('q')) => {
-                self.events.send(AppEvent::Shutdown)
+                self.events.send(AppEvent::Exit)
             }
             // ctrl+c to quit
             (AppMode::Default, KeyCode::Char('c' | 'C'))
                 if key_event.modifiers == KeyModifiers::CONTROL =>
             {
-                self.events.send(AppEvent::Shutdown)
+                self.events.send(AppEvent::Exit)
             }
 
             (AppMode::Command, _) => {
@@ -195,29 +167,16 @@ impl<'a> App<'a> {
     /// The tick event is where you can update the state of your application with any logic that
     /// needs to be updated at a fixed frame rate. E.g. polling a server, updating an animation.
     pub fn tick(&self) {
-        let proto = self.proto.clone();
-        let join_protocol = self.join_protocol.clone();
+        let protocol = self.protocol.clone();
         tokio::spawn(async move {
-            let peers = {
-                let peers = proto.peers().lock().await;
-                peers.keys().copied().collect::<Vec<_>>()
-            };
-
-            let join_code = join_protocol.get_code().await;
-
-            let (group_id, group_members) = {
-                let dgm_state = proto.dgm_state().await;
-                (dgm_state.as_ref().map(|s| s.0), dgm_state.map(|s| s.1))
-            };
-
-            let proto_state = ProtoState {
-                peers,
-                join_code,
-                group_id,
-                group_members,
-            };
-
-            app_send!(AppEvent::PollProtoState(proto_state));
+            match protocol.poll_state().await {
+                Ok(state) => {
+                    app_send!(AppEvent::PollProtocolState(state));
+                }
+                Err(e) => {
+                    app_log!("error polling protocol state: {e:#}");
+                }
+            }
         });
     }
 
@@ -225,7 +184,6 @@ impl<'a> App<'a> {
         match app_event {
             AppEvent::Log(s) => self.messages.push(s),
 
-            AppEvent::Shutdown => self.shutdown(),
             AppEvent::Exit => self.exit(),
 
             AppEvent::CommandMode => {
@@ -237,12 +195,12 @@ impl<'a> App<'a> {
                 self.command_state = TextState::default();
             }
 
-            AppEvent::PollProtoState(state) => self.proto_state = state,
+            AppEvent::PollProtocolState(state) => self.protocol_state = state,
 
             AppEvent::AddMember(id) => {
-                let proto = self.proto.clone();
+                let protocol = self.protocol.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = proto.add_group_member(id).await {
+                    if let Err(e) = protocol.add_group_member(id).await {
                         app_log!("error handling AddMember: {e:#}");
                     } else {
                         app_log!("handled AddMember");
@@ -257,49 +215,47 @@ impl<'a> App<'a> {
         let parts = command.split_whitespace().collect::<Vec<_>>();
 
         match parts[0] {
-            "q" => self.events.send(AppEvent::Shutdown),
+            "q" => self.events.send(AppEvent::Exit),
 
-            "c" => {
-                if parts.len() != 2 {
-                    anyhow::bail!("expected 1 argument");
-                }
+            // "c" => {
+            //     if parts.len() != 2 {
+            //         anyhow::bail!("expected 1 argument");
+            //     }
 
-                app_log!("connecting to {}", parts[1]);
+            //     app_log!("connecting to {}", parts[1]);
 
-                let addr = NodeAddr::new(parts[1].parse().context("failed to parse node id")?);
-                let proto = self.proto.clone();
-                let router = self.router.clone();
+            //     let addr = NodeAddr::new(parts[1].parse().context("failed to parse node id")?);
+            //     let proto = self.proto.clone();
+            //     let router = self.router.clone();
 
-                tokio::spawn(async move {
-                    proto.connect(router.endpoint(), addr).await.unwrap();
-                });
-            }
+            //     tokio::spawn(async move {
+            //         proto.connect(router.endpoint(), addr).await.unwrap();
+            //     });
+            // }
 
-            "b" => {
-                if parts.len() != 2 {
-                    anyhow::bail!("expected 1 argument");
-                }
+            // "b" => {
+            //     if parts.len() != 2 {
+            //         anyhow::bail!("expected 1 argument");
+            //     }
 
-                app_log!("broadcasting '{}'", parts[1]);
+            //     app_log!("broadcasting '{}'", parts[1]);
 
-                let proto = self.proto.clone();
-                let msg = parts[1].to_string();
-                tokio::spawn(async move {
-                    let peers = proto.peers().clone();
-                    let peers = peers.lock().await;
-                    for (id, peer) in peers.iter() {
-                        peer.send(crate::proto::Message::Text(msg.clone()))
-                    }
-                });
-            }
-
+            //     let proto = self.proto.clone();
+            //     let msg = parts[1].to_string();
+            //     tokio::spawn(async move {
+            //         let peers = proto.peers().clone();
+            //         let peers = peers.lock().await;
+            //         for (id, peer) in peers.iter() {
+            //             peer.send(crate::proto::Message::Text(msg.clone()))
+            //         }
+            //     });
+            // }
             "cg" => {
                 app_log!("creating group");
 
-                let proto = self.proto.clone();
-                let secret_key = self.router.endpoint().secret_key().clone();
+                let protocol = self.protocol.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = proto.create_group(secret_key).await {
+                    if let Err(e) = protocol.create_group().await {
                         app_log!("create group failed: {e:#}");
                     } else {
                         app_log!("create group success");
@@ -317,10 +273,9 @@ impl<'a> App<'a> {
                 let addr = NodeAddr::new(parts[1].parse().context("failed to parse node id")?);
                 let code = parts[2].to_string();
 
-                let join_protocol = self.join_protocol.clone();
-                let router = self.router.clone();
+                let protocol = self.protocol.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = join_protocol.join(router.endpoint(), addr, code).await {
+                    if let Err(e) = protocol.join_node(addr, code).await {
                         app_log!("join failed: {e:#}");
                     } else {
                         app_log!("join success");
@@ -330,7 +285,7 @@ impl<'a> App<'a> {
 
             "d" => {
                 // app_log!("app: {:?}", self);
-                app_log!("proto_state: {:?}", self.proto_state);
+                app_log!("proto_state: {:?}", self.protocol_state);
             }
 
             _ => {
@@ -338,18 +293,6 @@ impl<'a> App<'a> {
             }
         }
         Ok(())
-    }
-
-    /// Shut down and then exit the app.
-    fn shutdown(&mut self) {
-        let router = self.router.clone();
-        tokio::spawn(async move {
-            // shutdown router
-            router.shutdown().await.unwrap();
-
-            // send actual quit message
-            app_send!(AppEvent::Exit)
-        });
     }
 
     /// Exit the app.
