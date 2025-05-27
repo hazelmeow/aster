@@ -61,9 +61,14 @@ impl<'a> App<'a> {
             .protocol_state
             .peers
             .iter()
-            .map(|k| k.to_string())
+            .map(|k| {
+                let mut s = k.to_string();
+                s.truncate(6);
+                s.push_str("..");
+                s
+            })
             .collect::<Vec<_>>()
-            .join(",");
+            .join(", ");
 
         let mut lines = vec![
             Line::from(vec![
@@ -88,10 +93,15 @@ impl<'a> App<'a> {
             let mut group_members = group
                 .members
                 .iter()
-                .map(|k| k.to_string())
+                .map(|k| {
+                    let mut s = k.to_string();
+                    s.truncate(6);
+                    s.push_str("..");
+                    s
+                })
                 .collect::<Vec<_>>();
             group_members.sort();
-            let group_members = group_members.join(",");
+            let group_members = group_members.join(", ");
 
             lines.extend_from_slice(&[
                 Line::from(""),
