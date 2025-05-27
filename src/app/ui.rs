@@ -34,8 +34,8 @@ impl<'a> App<'a> {
             }
         };
 
-        let horizontal = Layout::horizontal([Min(0), Length(10)]);
-        let [tabs_area, title_area] = horizontal.areas(header_area);
+        let horizontal = Layout::horizontal([Min(0), Length(10), Length(10)]);
+        let [tabs_area, id_area, title_area] = horizontal.areas(header_area);
 
         // tabs
         let selected_tab_index = match self.screen {
@@ -68,6 +68,11 @@ impl<'a> App<'a> {
             .padding("", "")
             .divider(" ")
             .render(tabs_area, frame.buffer_mut());
+
+        // id
+        shorten_id(self.protocol.router.endpoint().node_id())
+            .yellow()
+            .render(id_area, frame.buffer_mut());
 
         // title
         "Aster ⁂".bold().render(title_area, frame.buffer_mut());
