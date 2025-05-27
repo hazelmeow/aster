@@ -81,31 +81,25 @@ impl<'a> App<'a> {
             ]),
             Line::from(vec!["Home Relay: ".into(), home_relay.yellow()]),
             Line::from(""),
-            Line::from(vec!["Peers: ".into(), peers.yellow()]),
-            Line::from(vec![
-                "Join Code: ".into(),
-                self.protocol_state.join_code.clone().yellow(),
-            ]),
+            Line::from(vec!["Connected Peers: ".into(), peers.yellow()]),
         ];
 
-        match (
-            &self.protocol_state.group_id,
-            &self.protocol_state.group_members,
-        ) {
-            (Some(group_id), Some(group_members)) => {
-                let group_members = group_members
-                    .iter()
-                    .map(|k| k.to_string())
-                    .collect::<Vec<_>>()
-                    .join(",");
+        if let Some(group) = &self.protocol_state.group {
+            let mut group_members = group
+                .members
+                .iter()
+                .map(|k| k.to_string())
+                .collect::<Vec<_>>();
+            group_members.sort();
+            let group_members = group_members.join(",");
 
-                lines.extend_from_slice(&[
-                    Line::from(""),
-                    Line::from(vec!["Group ID: ".into(), group_id.to_string().yellow()]),
-                    Line::from(vec!["Group Members: ".into(), group_members.yellow()]),
-                ]);
-            }
-            _ => {}
+            lines.extend_from_slice(&[
+                Line::from(""),
+                Line::from(vec!["Group ID: ".into(), group.id.to_string().yellow()]),
+                Line::from(vec!["Group Members: ".into(), group_members.yellow()]),
+                Line::from(""),
+                Line::from(vec!["Join Code: ".into(), group.join_code.clone().yellow()]),
+            ]);
         }
 
         let status_text = Text::from(lines);

@@ -22,9 +22,14 @@ use tokio::sync::Mutex;
 #[derive(Debug, Clone, Default)]
 pub struct ProtocolState {
     pub peers: Vec<NodeId>,
+    pub group: Option<ProtocolGroupState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProtocolGroupState {
     pub join_code: String,
-    pub group_id: Option<u64>,
-    pub group_members: Option<HashSet<NodeId>>,
+    pub id: u64,
+    pub members: HashSet<NodeId>,
 }
 
 #[derive(Debug)]
@@ -75,31 +80,27 @@ impl Protocol {
             peers.keys().copied().collect::<Vec<_>>()
         };
 
-        let join_code = {
-            let node_id = self.router.endpoint().node_id();
-            let code = self.join.get_code().await;
+        let group = {
+            let join_code = {
+                let node_id = self.router.endpoint().node_id();
+                let code = self.join.get_code().await;
 
-            let mut bytes = [0u8; 40];
-            bytes[0..32].copy_from_slice(node_id.as_bytes());
-            bytes[32..40].copy_from_slice(&code.to_be_bytes());
+                let mut bytes = [0u8; 40];
+                bytes[0..32].copy_from_slice(node_id.as_bytes());
+                bytes[32..40].copy_from_slice(&code.to_be_bytes());
 
-            BASE64_STANDARD_NO_PAD.encode(&bytes)
-        };
+                BASE64_STANDARD_NO_PAD.encode(&bytes)
+            };
 
-        let (group_id, group_members) = {
             let group = self.group.lock().await;
-            let group_state = group
-                .as_ref()
-                .map(|dgm| (dgm.group_id(), dgm.evaluate_members()));
-            (group_state.as_ref().map(|s| s.0), group_state.map(|s| s.1))
+            group.as_ref().map(|dgm| ProtocolGroupState {
+                id: dgm.group_id(),
+                members: dgm.evaluate_members(),
+                join_code,
+            })
         };
 
-        Ok(ProtocolState {
-            peers,
-            join_code,
-            group_id,
-            group_members,
-        })
+        Ok(ProtocolState { peers, group })
     }
 
     pub async fn create_group(&self) -> anyhow::Result<()> {
