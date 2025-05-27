@@ -9,13 +9,16 @@ pub(crate) mod sync;
 use crate::{
     app::app_log,
     profile::Profile,
-    proto::{join::JoinProtocol, sync::SyncProtocol},
+    proto::{clock::Clock, join::JoinProtocol, sync::SyncProtocol},
 };
 use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 use dgm::GroupMembership;
-use iroh::{NodeAddr, NodeId, PublicKey, protocol::Router};
-use std::{collections::HashSet, sync::Arc};
-use tokio::sync::{Mutex, mpsc};
+use iroh::{NodeAddr, NodeId, PublicKey, endpoint::Connection, protocol::Router};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
+use tokio::sync::{Mutex, mpsc::UnboundedReceiver};
 
 /// View of protocol state for UI.
 ///
@@ -41,11 +44,15 @@ pub struct Protocol {
     join: JoinProtocol,
 
     pub group: Mutex<Option<GroupMembership>>, // TODO: remove pub
+
+    sync_peers: Arc<Mutex<HashMap<NodeId, sync::Peer>>>,
 }
 
 /// Internal protocol events for signaling.
 pub enum ProtocolEvent {
     AddGroupMember(NodeId),
+
+    SyncConnection(iroh::endpoint::Connection),
 }
 
 impl Protocol {
@@ -59,8 +66,10 @@ impl Protocol {
             .bind()
             .await?;
 
+        let sync_peers = Arc::new(Mutex::new(HashMap::new()));
+
         // create protocols
-        let sync = SyncProtocol::new();
+        let sync = SyncProtocol::new(tx.clone());
         let join = JoinProtocol::new(tx.clone());
 
         // create iroh router
@@ -76,6 +85,8 @@ impl Protocol {
             join,
 
             group: Mutex::new(None),
+
+            sync_peers,
         });
 
         tokio::spawn({
@@ -85,6 +96,19 @@ impl Protocol {
                     let res = match event {
                         ProtocolEvent::AddGroupMember(node_id) => {
                             protocol.add_group_member(node_id).await
+                        }
+
+                        ProtocolEvent::SyncConnection(connection) => {
+                            tokio::spawn({
+                                let protocol = protocol.clone();
+                                async move {
+                                    let res = protocol.sync_accept(connection).await;
+                                    if let Err(e) = res {
+                                        app_log!("error during sync_accept: {e:#}");
+                                    }
+                                }
+                            });
+                            Ok(())
                         }
                     };
 
@@ -105,7 +129,7 @@ impl Protocol {
 
     pub async fn poll_state(&self) -> anyhow::Result<ProtocolState> {
         let peers = {
-            let peers = self.sync.peers().lock().await;
+            let peers = self.sync_peers.lock().await;
             peers.keys().copied().collect::<Vec<_>>()
         };
 
@@ -145,7 +169,7 @@ impl Protocol {
         Ok(())
     }
 
-    pub async fn add_group_member(&self, node_id: NodeId) -> anyhow::Result<()> {
+    pub async fn add_group_member(self: &Arc<Self>, node_id: NodeId) -> anyhow::Result<()> {
         let new_members = {
             let mut group = self.group.lock().await;
             let group = group.as_mut().ok_or(anyhow::anyhow!("not in a group"))?;
@@ -160,7 +184,7 @@ impl Protocol {
         Ok(())
     }
 
-    pub async fn remove_group_member(&self, node_id: NodeId) -> anyhow::Result<()> {
+    pub async fn remove_group_member(self: &Arc<Self>, node_id: NodeId) -> anyhow::Result<()> {
         let new_members = {
             let mut group = self.group.lock().await;
             let group = group.as_mut().ok_or(anyhow::anyhow!("not in a group"))?;
@@ -180,11 +204,14 @@ impl Protocol {
         Ok(())
     }
 
-    async fn reconcile_group_members(&self, members: HashSet<PublicKey>) -> anyhow::Result<()> {
+    async fn reconcile_group_members(
+        self: &Arc<Self>,
+        members: HashSet<PublicKey>,
+    ) -> anyhow::Result<()> {
         let my_id = self.router.endpoint().node_id();
 
         let sync_peers = {
-            let sync_peers = self.sync.peers().lock().await;
+            let sync_peers = self.sync_peers.lock().await;
 
             // disconnect removed members
             for (peer_id, peer) in sync_peers.iter() {
@@ -205,15 +232,154 @@ impl Protocol {
 
         // connect to new members
         // TODO: ratelimit attempts?
-        for member in &members {
-            if *member == my_id {
+        for member in members.iter().copied() {
+            if member == my_id {
                 continue;
             }
 
-            if !sync_peers.contains(member) {
-                app_log!("member {member} not connected, attempting to connect");
-                let addr = NodeAddr::from(*member);
-                self.sync.connect(self.router.endpoint(), addr).await?;
+            if !sync_peers.contains(&member) {
+                app_log!("[proto] member {member} not connected, attempting to connect");
+                let protocol = self.clone();
+                tokio::spawn(async move {
+                    let res = protocol.sync_connect(member).await;
+                    if let Err(e) = res {
+                        app_log!("error connecting: {e:#}");
+                    };
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    // connect to a node
+    // long lived, should be spawned on a task
+    async fn sync_connect(&self, node_id: NodeId) -> anyhow::Result<()> {
+        app_log!("[proto] [-> {node_id}] connecting");
+
+        // open a connection to the accepting node
+        let connection = self
+            .router
+            .endpoint()
+            .connect(NodeAddr::new(node_id), SyncProtocol::ALPN)
+            .await?;
+        app_log!("[proto] [-> {node_id}] connected");
+
+        // open a bidirectional QUIC stream
+        let (send_stream, recv_stream) = connection.open_bi().await?;
+        app_log!("[proto] [-> {node_id}] opened stream");
+
+        // spawn tasks to bridge streams and channels
+        let (peer, mut msg_rx) = sync::handle_connection_streams(node_id, send_stream, recv_stream);
+
+        // TODO
+        app_log!("[proto] [-> {node_id}] sending handshake");
+        peer.send(sync::Message::Handshake {
+            group_id: 0,
+            local_clock: Clock::new(),
+        });
+
+        // wait for reply handshake
+        let handshake = msg_rx.recv().await;
+        app_log!("[proto] [-> {node_id}] got reply handshake");
+        match handshake {
+            Some(message) => {
+                //
+            }
+            None => {
+                // stream closed
+                peer.close();
+            }
+        }
+
+        self.sync_handshake_complete(connection, peer, msg_rx).await
+    }
+
+    // accept a connection
+    // long-lived, should be spawned on a task
+    async fn sync_accept(&self, connection: iroh::endpoint::Connection) -> anyhow::Result<()> {
+        // get the remote node id
+        let node_id = connection.remote_node_id()?;
+
+        app_log!("[proto] [-> {node_id}] accepted connection");
+
+        // we expect the connecting peer to open a single bi-directional stream
+        let (send_stream, recv_stream) = connection.accept_bi().await?;
+        app_log!("[proto] [-> {node_id}] accepted stream");
+
+        // spawn tasks to bridge streams and channels
+        let (peer, mut msg_rx) = sync::handle_connection_streams(node_id, send_stream, recv_stream);
+
+        // wait for handshake message
+        let handshake = msg_rx.recv().await;
+        app_log!("[proto] [-> {node_id}] received handshake");
+        match handshake {
+            Some(message) => {
+                //
+            }
+            None => {
+                // stream closed
+                return Ok(());
+            }
+        }
+
+        // send reply handshake
+        app_log!("[proto] [-> {node_id}] sending reply handshake");
+        peer.send(sync::Message::Handshake {
+            group_id: 0,
+            local_clock: Clock::new(),
+        });
+
+        self.sync_handshake_complete(connection, peer, msg_rx).await
+    }
+
+    // handle a sync peer after handshaking successfully
+    // used by both ends of the connection
+    // long-lived, should be spawned on a task
+    async fn sync_handshake_complete(
+        &self,
+        connection: Connection,
+        peer: sync::Peer,
+        mut msg_rx: UnboundedReceiver<sync::Message>,
+    ) -> anyhow::Result<()> {
+        // get the remote node id
+        let node_id = connection.remote_node_id()?;
+
+        let cancel_token = peer.cancel_token.clone();
+
+        // add to peer map
+        {
+            let mut peers = self.sync_peers.lock().await;
+            peers.insert(node_id, peer);
+        }
+
+        loop {
+            tokio::select! {
+                msg = msg_rx.recv() => {
+                    app_log!("message from peer {node_id}: {msg:?}");
+                }
+
+                // if the connection closes for any reason, cancel to start cleanup
+                _ = connection.closed() => {
+                    cancel_token.cancel();
+                }
+
+                // close connection when cancel token is cancelled
+                _ = cancel_token.cancelled() => {
+                    // explicitly close the connection
+                    connection.close(0u32.into(), b"closed");
+
+                    // remove from peer map
+                    {
+                        let mut peers = self.sync_peers.lock().await;
+                        peers.remove(&node_id);
+                    }
+
+                    app_log!("[proto] [-> {node_id}] connection closed");
+
+                    // only break once cancel token has been cancelled, to ensure cleanup happens
+                    break;
+                }
             }
         }
 

@@ -1,40 +1,39 @@
 use crate::{
     app::app_log,
-    proto::{
-        acb::SignedMessage,
-        dgm::{GroupMembership, Operation},
-    },
+    proto::{ProtocolEvent, acb::SignedMessage, clock::Clock, dgm::Operation},
 };
 use iroh::{
-    Endpoint, NodeAddr, NodeId, SecretKey,
+    NodeId,
     endpoint::{RecvStream, SendStream},
 };
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
-    Ping(u32),
-    Pong(u32),
-    Text(String),
+    Handshake {
+        group_id: u64,
+        local_clock: Clock,
+    },
     Welcome {
+        group_id: u64,
         messages: Vec<SignedMessage<Operation>>,
     },
+
     Sync {
         messages: Vec<SignedMessage<Operation>>,
     },
+
+    Ping(u32),
+    Pong(u32),
+    Text(String),
 }
 
 #[derive(Debug)]
 pub struct Peer {
-    tx: mpsc::UnboundedSender<Message>,
-    rx: mpsc::UnboundedReceiver<Message>,
-    cancel_token: CancellationToken,
+    pub tx: mpsc::UnboundedSender<Message>,
+    pub cancel_token: CancellationToken,
 }
 
 impl Peer {
@@ -47,72 +46,26 @@ impl Peer {
     }
 }
 
+/// Sync protocol handler.
+///
+/// Protocol flow:
+/// - A connects to B
+/// - A sends handshake to B
+///     - Message::Welcome if just added to group
+///     - Message::Handshake if not new
+/// - B sends handshake to A
+/// - Peers reach connected state
+/// - Peers sync ACB
 #[derive(Debug, Clone)]
 pub struct SyncProtocol {
-    peers: Arc<Mutex<HashMap<NodeId, Peer>>>,
+    tx: UnboundedSender<ProtocolEvent>,
 }
 
 impl SyncProtocol {
     pub const ALPN: &[u8] = b"aster/0";
 
-    pub fn new() -> Self {
-        Self {
-            peers: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
-    pub async fn connect(&self, endpoint: &Endpoint, addr: NodeAddr) -> anyhow::Result<()> {
-        let node_id = addr.node_id;
-        app_log!("[proto] connecting to {}", node_id);
-
-        // Open a connection to the accepting node
-        let conn = endpoint.connect(addr, SyncProtocol::ALPN).await?;
-
-        app_log!("[proto] connected");
-
-        // Open a bidirectional QUIC stream
-        let (send_stream, recv_stream) = conn.open_bi().await?;
-
-        app_log!("[proto] opened stream");
-
-        let peer = handle_connection_streams(node_id, send_stream, recv_stream);
-
-        // spawn a task for cleanup after cancellation
-        tokio::spawn({
-            let peers = self.peers.clone();
-            let cancel_token = peer.cancel_token.clone();
-            async move {
-                // wait for cancellation
-                cancel_token.cancelled().await;
-
-                // explicitly close the conncetion
-                conn.close(0u32.into(), b"closed");
-
-                // remove from peer map
-                {
-                    let mut peers = peers.lock().await;
-                    peers.remove(&node_id);
-                }
-
-                app_log!("[proto] connection to {} closed", node_id);
-            }
-        });
-
-        peer.tx.send(Message::Ping(1));
-
-        // insert into peer map
-        {
-            let mut peers = self.peers.lock().await;
-            peers.insert(node_id, peer);
-        }
-
-        app_log!("[proto] initialized");
-
-        Ok(())
-    }
-
-    pub fn peers(&self) -> &Arc<Mutex<HashMap<NodeId, Peer>>> {
-        &self.peers
+    pub fn new(tx: UnboundedSender<ProtocolEvent>) -> Self {
+        Self { tx }
     }
 }
 
@@ -126,52 +79,21 @@ impl iroh::protocol::ProtocolHandler for SyncProtocol {
         &self,
         connection: iroh::endpoint::Connection,
     ) -> n0_future::boxed::BoxFuture<anyhow::Result<()>> {
-        let peers = self.peers.clone();
+        self.tx
+            .send(ProtocolEvent::SyncConnection(connection))
+            .unwrap();
 
-        Box::pin(async move {
-            // get the remote node id
-            let node_id = connection.remote_node_id()?;
-            app_log!("[proto] accepted connection from {node_id}");
-
-            // we expect the connecting peer to open a single bi-directional stream
-            let (send_stream, recv_stream) = connection.accept_bi().await?;
-
-            let peer = handle_connection_streams(node_id, send_stream, recv_stream);
-
-            peer.tx.send(Message::Ping(2));
-
-            let cancel_token = peer.cancel_token.clone();
-
-            {
-                let mut peers = peers.lock().await;
-                peers.insert(node_id, peer);
-            }
-
-            // wait for connection close or cancellation
-            tokio::select! {
-                _ = connection.closed() => {}
-                _ = cancel_token.cancelled() => {
-                    connection.close(0u32.into(), b"closed");
-                }
-            }
-
-            {
-                let mut peers = peers.lock().await;
-                peers.remove(&node_id);
-            }
-
-            app_log!("[proto] connection from {node_id} closed");
-
-            Ok(())
-        })
+        Box::pin(async move { Ok(()) })
     }
 }
 
-fn handle_connection_streams(
+// spawn tasks to bridge connection streams and message channels.
+// return the receiver separately since it can't be cloned
+pub fn handle_connection_streams(
     node_id: NodeId,
     mut send_stream: SendStream,
     mut recv_stream: RecvStream,
-) -> Peer {
+) -> (Peer, UnboundedReceiver<Message>) {
     let (send_tx, mut send_rx) = mpsc::unbounded_channel::<Message>();
     let (recv_tx, recv_rx) = mpsc::unbounded_channel::<Message>();
 
@@ -242,9 +164,10 @@ fn handle_connection_streams(
         }
     });
 
-    Peer {
+    let peer = Peer {
         tx: send_tx,
-        rx: recv_rx,
         cancel_token,
-    }
+    };
+
+    (peer, recv_rx)
 }
