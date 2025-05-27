@@ -15,6 +15,7 @@ use acb::{CausalBroadcast, SignedMessage};
 use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 use dgm::{GroupMembership, Operation};
 use iroh::{NodeAddr, NodeId, PublicKey, endpoint::Connection, protocol::Router};
+use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -31,6 +32,8 @@ use tokio::sync::{
 pub struct ProtocolState {
     pub peers: Vec<NodeId>,
     pub group: Option<ProtocolGroupState>,
+    pub local_files: Vec<u64>,
+    pub remote_files: HashMap<u64, HashSet<NodeId>>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,7 +54,10 @@ pub struct Protocol {
 
     pub group: Mutex<Option<GroupMembership>>, // TODO: remove pub
 
-    sync_peers: Arc<Mutex<HashMap<NodeId, sync::Peer>>>,
+    sync_peers: Arc<Mutex<HashMap<NodeId, sync::Peer>>>, // TODO: remove arc
+
+    local_files: Vec<u64>,
+    remote_files: Mutex<HashMap<u64, HashSet<NodeId>>>,
 }
 
 /// Internal protocol events for signaling.
@@ -59,8 +65,9 @@ pub enum ProtocolEvent {
     AddGroupMember(NodeId),
 
     SyncConnection(iroh::endpoint::Connection),
-
     SyncMessages(Vec<SignedMessage<Operation>>),
+
+    RemoteFiles(NodeId, Vec<u64>),
 }
 
 impl Protocol {
@@ -97,6 +104,11 @@ impl Protocol {
             group: Mutex::new(None),
 
             sync_peers,
+
+            local_files: std::iter::repeat_with(|| rand::thread_rng().r#gen())
+                .take(5)
+                .collect(),
+            remote_files: Mutex::new(HashMap::new()),
         });
 
         tokio::spawn({
@@ -136,6 +148,20 @@ impl Protocol {
                                     let res = protocol.deliver_group_messages(group).await;
                                     if let Err(e) = res {
                                         app_log!("error during deliver_group_messages: {e:#}");
+                                    }
+                                }
+                            });
+                            Ok(())
+                        }
+
+                        ProtocolEvent::RemoteFiles(peer_id, files) => {
+                            tokio::spawn({
+                                let protocol = protocol.clone();
+                                async move {
+                                    let mut remote_files = protocol.remote_files.lock().await;
+
+                                    for file_hash in files {
+                                        remote_files.entry(file_hash).or_default().insert(peer_id);
                                     }
                                 }
                             });
@@ -184,7 +210,18 @@ impl Protocol {
             })
         };
 
-        Ok(ProtocolState { peers, group })
+        let local_files = self.local_files.clone();
+        let remote_files = {
+            let remote_files = self.remote_files.lock().await;
+            remote_files.clone()
+        };
+
+        Ok(ProtocolState {
+            peers,
+            group,
+            local_files,
+            remote_files,
+        })
     }
 
     pub async fn create_group(&self) -> anyhow::Result<()> {
@@ -498,13 +535,16 @@ impl Protocol {
 
         let cancel_token = peer.cancel_token.clone();
 
+        // send local files
+        peer.send(sync::Message::FileList(self.local_files.clone()));
+
+        // TODO: initiate sync w known remote_clock from handshake
+
         // add to peer map
         {
             let mut peers = self.sync_peers.lock().await;
             peers.insert(node_id, peer);
         }
-
-        // TODO: initiate sync w known remote_clock from handshake
 
         loop {
             tokio::select! {
@@ -520,8 +560,9 @@ impl Protocol {
                             app_log!("unexpected message");
                         }
 
-                        msg => {
-                            app_log!("message from peer {node_id}: {msg:?}");
+                        sync::Message::FileList(files) => {
+                            app_log!("[proto] [-> {node_id}] received list of {} local files", files.len());
+                            self.tx.send(ProtocolEvent::RemoteFiles(node_id, files)).unwrap();
                         }
                     }
                 }

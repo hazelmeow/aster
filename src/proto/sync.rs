@@ -26,9 +26,7 @@ pub enum Message {
         messages: Vec<SignedMessage<Operation>>,
     },
 
-    Ping(u32),
-    Pong(u32),
-    Text(String),
+    FileList(Vec<u64>),
 }
 
 #[derive(Debug)]

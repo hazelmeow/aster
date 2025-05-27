@@ -1,10 +1,11 @@
 //! The app TUI.
 
 use crate::app::{App, AppMode, AppScreen};
+use iroh::NodeId;
 use ratatui::{
     Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Stylize},
+    layout::{Constraint, Layout, Rect},
+    style::Stylize,
     symbols::border,
     text::{Line, Text},
     widgets::{Block, Paragraph, Tabs, Widget, Wrap},
@@ -122,12 +123,8 @@ impl<'a> App<'a> {
             .protocol_state
             .peers
             .iter()
-            .map(|k| {
-                let mut s = k.to_string();
-                s.truncate(6);
-                s.push_str("..");
-                s
-            })
+            .copied()
+            .map(shorten_id)
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -154,12 +151,8 @@ impl<'a> App<'a> {
             let mut group_members = group
                 .members
                 .iter()
-                .map(|k| {
-                    let mut s = k.to_string();
-                    s.truncate(6);
-                    s.push_str("..");
-                    s
-                })
+                .copied()
+                .map(shorten_id)
                 .collect::<Vec<_>>();
             group_members.sort();
             let group_members = group_members.join(", ");
@@ -217,8 +210,54 @@ impl<'a> App<'a> {
             .title_bottom(instructions.left_aligned())
             .border_set(border::THICK);
 
-        Paragraph::new(Line::from("todo"))
+        let lines = std::iter::once(Line::from(vec![
+            "Local Files (".into(),
+            self.protocol_state.local_files.len().to_string().into(),
+            "):".into(),
+        ]))
+        .chain(
+            self.protocol_state
+                .local_files
+                .iter()
+                .map(|file_hash| Line::from(vec![" - ".into(), file_hash.to_string().into()])),
+        )
+        .chain(std::iter::once("".into()))
+        .chain(std::iter::once(Line::from(vec![
+            "Remote Files (".into(),
+            self.protocol_state.remote_files.len().to_string().into(),
+            "):".into(),
+        ])))
+        .chain(
+            self.protocol_state
+                .remote_files
+                .iter()
+                .map(|(file_hash, nodes)| {
+                    let nodes = nodes
+                        .iter()
+                        .copied()
+                        .map(shorten_id)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+
+                    Line::from(vec![
+                        " - ".into(),
+                        file_hash.to_string().into(),
+                        " on ".into(),
+                        nodes.into(),
+                    ])
+                }),
+        )
+        .collect::<Vec<_>>();
+
+        Paragraph::new(lines)
             .block(block)
             .render(area, frame.buffer_mut());
     }
+}
+
+fn shorten_id(node_id: NodeId) -> String {
+    let mut s = node_id.to_string();
+    s.truncate(6);
+    s.push_str("..");
+    s
 }

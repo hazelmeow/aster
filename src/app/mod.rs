@@ -134,17 +134,19 @@ impl<'a> App<'a> {
     /// Handles the key events and updates the state of [`App`].
     pub fn handle_key_events(&mut self, key_event: KeyEvent) -> anyhow::Result<()> {
         match (self.mode, key_event.code) {
-            // any mode
-
-            // change screens
-            (_, KeyCode::Char('1')) => self.events.send(AppEvent::Screen(AppScreen::Group)),
-            (_, KeyCode::Char('2')) => self.events.send(AppEvent::Screen(AppScreen::Library)),
-
             // default mode
 
             // : or / to enter command mode
             (AppMode::Default, KeyCode::Char(':') | KeyCode::Char('/')) => {
                 self.events.send(AppEvent::CommandMode)
+            }
+
+            // change screens
+            (AppMode::Default, KeyCode::Char('1')) => {
+                self.events.send(AppEvent::Screen(AppScreen::Group))
+            }
+            (AppMode::Default, KeyCode::Char('2')) => {
+                self.events.send(AppEvent::Screen(AppScreen::Library))
             }
 
             // esc or q to quit
@@ -158,6 +160,7 @@ impl<'a> App<'a> {
                 self.events.send(AppEvent::Exit)
             }
 
+            // command mode
             (AppMode::Command, _) => {
                 self.command_state.handle_key_event(key_event);
 
