@@ -18,6 +18,7 @@ pub enum Message {
     },
     Welcome {
         group_id: u64,
+        local_clock: Clock,
         messages: Vec<SignedMessage<Operation>>,
     },
 
@@ -54,6 +55,7 @@ impl Peer {
 ///     - Message::Welcome if just added to group
 ///     - Message::Handshake if not new
 /// - B sends handshake to A
+///     - Always Message::Handshake
 /// - Peers reach connected state
 /// - Peers sync ACB
 #[derive(Debug, Clone)]
@@ -111,7 +113,7 @@ pub fn handle_connection_streams(
                         match res {
                             Ok(Some(n)) => {
                                 let msg: Message = postcard::from_bytes(&recv_buf[0..n]).unwrap();
-                                app_log!("[proto] got message from {node_id}: {msg:?}");
+                                // app_log!("[proto] got message from {node_id}: {msg:?}");
                                 recv_tx.send(msg).unwrap();
                             }
                             Ok(None) => {
@@ -144,7 +146,7 @@ pub fn handle_connection_streams(
                     res = send_rx.recv() => {
                         match res {
                             Some(msg) => {
-                                app_log!("[proto] sending message to {node_id}: {msg:?}");
+                                // app_log!("[proto] sending message to {node_id}: {msg:?}");
                                 let buf = postcard::to_stdvec(&msg).unwrap();
                                 send_stream.write_all(&buf).await.unwrap();
                             }

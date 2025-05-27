@@ -47,6 +47,17 @@ impl<P: Clone + Serialize> CausalBroadcast<P> {
             received: Vec::new(),
         }
     }
+    pub fn from_messages(
+        secret_key: SecretKey,
+        clock: Clock,
+        received: Vec<SignedMessage<P>>,
+    ) -> Self {
+        Self {
+            secret_key,
+            clock,
+            received,
+        }
+    }
 
     pub fn local_id(&self) -> NodeId {
         self.secret_key.public().into()
