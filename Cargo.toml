@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
+base64 = "0.22.1"
 crossterm = { version = "0.28.1", features = ["event-stream"] }
 env_filter = "0.1.3"
 futures = "0.3.31"

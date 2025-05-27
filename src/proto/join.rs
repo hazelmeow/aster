@@ -36,18 +36,16 @@ impl TryFrom<u8> for Response {
     }
 }
 
-// TODO: encode as local node id + random code, then to some string
 #[derive(Debug)]
 struct Code {
-    code: String,
+    code: u64,
     expires_at: Instant,
     used: bool,
 }
 
 impl Code {
     fn new() -> Self {
-        let n = rand::thread_rng().gen_range(100000..=999999);
-        let code = n.to_string();
+        let code = rand::thread_rng().r#gen();
 
         let now = Instant::now();
         let expires_at = now + CODE_TTL;
@@ -94,20 +92,20 @@ impl JoinProtocol {
     }
 
     /// Get a code that doesn't expire soon.
-    pub async fn get_code(&self) -> String {
+    pub async fn get_code(&self) -> u64 {
         self.gc_codes().await;
 
         let mut codes = self.codes.lock().await;
         let code = codes.iter().find(|c| !c.expires_soon() && !c.used);
         if let Some(code) = code {
-            code.code.clone()
+            code.code
         } else {
             let code = Code::new();
-            let code_string = code.code.clone();
+            let ret = code.code;
 
             codes.push(code);
 
-            code_string
+            ret
         }
     }
 
@@ -116,12 +114,7 @@ impl JoinProtocol {
         codes.retain(|c| !c.is_old());
     }
 
-    pub async fn join(
-        &self,
-        endpoint: &Endpoint,
-        addr: NodeAddr,
-        code: String,
-    ) -> anyhow::Result<()> {
+    pub async fn join(&self, endpoint: &Endpoint, addr: NodeAddr, code: u64) -> anyhow::Result<()> {
         // connect to address
         let connection = endpoint.connect(addr, JoinProtocol::ALPN).await?;
 
@@ -129,7 +122,7 @@ impl JoinProtocol {
         let (mut send_stream, mut recv_stream) = connection.open_bi().await?;
 
         // write code as bytes
-        send_stream.write_all(code.as_bytes()).await?;
+        send_stream.write_all(&code.to_be_bytes()).await?;
         send_stream.finish()?;
 
         // read response
@@ -163,15 +156,26 @@ impl iroh::protocol::ProtocolHandler for JoinProtocol {
             let (mut send_stream, mut recv_stream) = connection.accept_bi().await?;
 
             // read request
-            let buf = recv_stream.read_to_end(1024).await?;
+            let buf = recv_stream.read_to_end(8).await?;
 
             // parse request
-            let Ok(code) = String::from_utf8(buf) else {
+            let Ok(code) = ('code: {
+                if buf.len() != 8 {
+                    break 'code Err(Response::ErrorInvalid);
+                }
+
+                let Ok(code_bytes) = TryInto::<[u8; 8]>::try_into(buf) else {
+                    break 'code Err(Response::ErrorInvalid);
+                };
+
+                let code = u64::from_be_bytes(code_bytes);
+                Ok(code)
+            }) else {
                 send_stream
                     .write_all(&[Response::ErrorInvalid as u8])
                     .await?;
                 send_stream.finish()?;
-                connection.close(0u32.into(), b"done");
+                connection.close(0u32.into(), b"done"); // TODO: maybe shouldn't close on this end
                 return Ok(());
             };
 

@@ -7,6 +7,7 @@ use crate::{
     proto::{Protocol, ProtocolState, join::JoinProtocol},
 };
 use anyhow::Context;
+use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 use iroh::{NodeAddr, NodeId, protocol::Router};
 use ratatui::{
     DefaultTerminal,
@@ -264,18 +265,28 @@ impl<'a> App<'a> {
             }
 
             "j" => {
-                if parts.len() != 3 {
-                    anyhow::bail!("expected 2 arguments");
+                if parts.len() != 2 {
+                    anyhow::bail!("expected 1 arguments");
                 }
 
-                app_log!("joining {} with code {}", parts[1], parts[2]);
+                let code_bytes = BASE64_STANDARD_NO_PAD
+                    .decode(parts[1])
+                    .context("failed to decode join code")?;
+                if code_bytes.len() != 40 {
+                    anyhow::bail!("wrong length for join code");
+                }
 
-                let addr = NodeAddr::new(parts[1].parse().context("failed to parse node id")?);
-                let code = parts[2].to_string();
+                let node_id = NodeId::from_bytes(code_bytes[0..32].try_into().unwrap())
+                    .context("failed to parse join code")?;
+                let node_addr = NodeAddr::new(node_id);
+
+                let code = u64::from_be_bytes(code_bytes[32..40].try_into().unwrap());
+
+                app_log!("joining {} with code {}", node_id, code);
 
                 let protocol = self.protocol.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = protocol.join_node(addr, code).await {
+                    if let Err(e) = protocol.join_node(node_addr, code).await {
                         app_log!("join failed: {e:#}");
                     } else {
                         app_log!("join success");

@@ -124,6 +124,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arbtest",
+ "base64",
  "crossterm",
  "env_filter",
  "futures",

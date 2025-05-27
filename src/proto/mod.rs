@@ -10,6 +10,7 @@ use crate::{
     profile::Profile,
     proto::{join::JoinProtocol, sync::SyncProtocol},
 };
+use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 use dgm::GroupMembership;
 use iroh::{NodeAddr, NodeId, protocol::Router};
 use std::{collections::HashSet, sync::Arc};
@@ -74,7 +75,16 @@ impl Protocol {
             peers.keys().copied().collect::<Vec<_>>()
         };
 
-        let join_code = self.join.get_code().await;
+        let join_code = {
+            let node_id = self.router.endpoint().node_id();
+            let code = self.join.get_code().await;
+
+            let mut bytes = [0u8; 40];
+            bytes[0..32].copy_from_slice(node_id.as_bytes());
+            bytes[32..40].copy_from_slice(&code.to_be_bytes());
+
+            BASE64_STANDARD_NO_PAD.encode(&bytes)
+        };
 
         let (group_id, group_members) = {
             let group = self.group.lock().await;
@@ -114,7 +124,7 @@ impl Protocol {
         Ok(())
     }
 
-    pub async fn join_node(&self, addr: NodeAddr, code: String) -> anyhow::Result<()> {
+    pub async fn join_node(&self, addr: NodeAddr, code: u64) -> anyhow::Result<()> {
         self.join.join(self.router.endpoint(), addr, code).await?;
         Ok(())
     }
