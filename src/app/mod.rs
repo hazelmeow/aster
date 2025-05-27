@@ -52,8 +52,6 @@ pub enum AppEvent {
     ExitMode,
 
     PollProtocolState(ProtocolState),
-
-    AddMember(NodeId),
 }
 
 macro_rules! app_log {
@@ -79,7 +77,7 @@ impl<'a> App<'a> {
         // profile.save().await?;
         // }
 
-        let protocol = Arc::new(Protocol::new(&profile).await?);
+        let protocol = Protocol::new(&profile).await?;
 
         let events = EventHandler::new();
 
@@ -126,8 +124,10 @@ impl<'a> App<'a> {
         match (self.mode, key_event.code) {
             // default mode
 
-            // : to enter command mode
-            (AppMode::Default, KeyCode::Char(':')) => self.events.send(AppEvent::CommandMode),
+            // : or / to enter command mode
+            (AppMode::Default, KeyCode::Char(':') | KeyCode::Char('/')) => {
+                self.events.send(AppEvent::CommandMode)
+            }
 
             // esc or q to quit
             (AppMode::Default, KeyCode::Esc | KeyCode::Char('q')) => {
@@ -197,17 +197,6 @@ impl<'a> App<'a> {
             }
 
             AppEvent::PollProtocolState(state) => self.protocol_state = state,
-
-            AppEvent::AddMember(id) => {
-                let protocol = self.protocol.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = protocol.add_group_member(id).await {
-                        app_log!("error handling AddMember: {e:#}");
-                    } else {
-                        app_log!("handled AddMember");
-                    }
-                });
-            }
         }
         Ok(())
     }
@@ -266,7 +255,7 @@ impl<'a> App<'a> {
 
             "j" => {
                 if parts.len() != 2 {
-                    anyhow::bail!("expected 1 arguments");
+                    anyhow::bail!("expected 1 argument");
                 }
 
                 let code_bytes = BASE64_STANDARD_NO_PAD
@@ -294,9 +283,43 @@ impl<'a> App<'a> {
                 });
             }
 
+            "r" | "remove" => {
+                if parts.len() != 2 {
+                    anyhow::bail!("expected 1 argument");
+                }
+
+                let node_id = parts[1].parse().context("failed to parse node id")?;
+
+                app_log!("removing {node_id}");
+
+                let protocol = self.protocol.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = protocol.remove_group_member(node_id).await {
+                        app_log!("remove failed: {e:#}");
+                    } else {
+                        app_log!("remove success");
+                    }
+                });
+            }
+
             "d" => {
                 // app_log!("app: {:?}", self);
-                app_log!("proto_state: {:?}", self.protocol_state);
+                // app_log!("proto_state: {:?}", self.protocol_state);
+                app_log!(
+                    "protocol state group members: {:?}",
+                    self.protocol_state.group.as_ref().map(|g| &g.members)
+                );
+
+                let protocol = self.protocol.clone();
+                tokio::spawn(async move {
+                    let group = protocol.group.lock().await;
+                    let Some(group) = group.as_ref() else {
+                        app_log!("not in group");
+                        return;
+                    };
+
+                    app_log!("mutex members: {:?}", group.evaluate_members());
+                });
             }
 
             _ => {

@@ -1,14 +1,13 @@
 //! Group management protocol.
 
+use crate::{app::app_log, proto::ProtocolEvent};
 use iroh::{Endpoint, NodeAddr, endpoint::Connection};
 use rand::Rng;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::Mutex;
-
-use crate::app::{AppEvent, app_log, event::app_send};
+use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 const CODE_TTL: Duration = Duration::from_secs(60 * 2);
 const EXPIRES_SOON_THRESHOLD: Duration = Duration::from_secs(60);
@@ -78,6 +77,7 @@ impl Code {
 #[derive(Debug, Clone)]
 pub struct JoinProtocol {
     codes: Arc<Mutex<Vec<Code>>>,
+    tx: UnboundedSender<ProtocolEvent>,
 }
 
 impl JoinProtocol {
@@ -85,9 +85,10 @@ impl JoinProtocol {
 }
 
 impl JoinProtocol {
-    pub fn new() -> Self {
+    pub fn new(tx: UnboundedSender<ProtocolEvent>) -> Self {
         Self {
             codes: Arc::new(Mutex::new(Vec::new())),
+            tx,
         }
     }
 
@@ -149,6 +150,7 @@ impl JoinProtocol {
 impl iroh::protocol::ProtocolHandler for JoinProtocol {
     fn accept(&self, connection: Connection) -> n0_future::boxed::BoxFuture<anyhow::Result<()>> {
         let codes = self.codes.clone();
+        let tx = self.tx.clone();
         Box::pin(async move {
             let node_id = connection.remote_node_id()?;
 
@@ -200,7 +202,7 @@ impl iroh::protocol::ProtocolHandler for JoinProtocol {
                             .await?;
                     } else {
                         // tell protocol to add user to grup
-                        app_send!(AppEvent::AddMember(node_id));
+                        tx.send(ProtocolEvent::AddGroupMember(node_id)).unwrap();
 
                         app_log!(
                             "[proto/join] peer {node_id} joined using code {}",

@@ -41,6 +41,10 @@ impl Peer {
     pub fn send(&self, message: Message) {
         let _ = self.tx.send(message);
     }
+
+    pub fn close(&self) {
+        self.cancel_token.cancel();
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +137,8 @@ impl iroh::protocol::ProtocolHandler for SyncProtocol {
             let (send_stream, recv_stream) = connection.accept_bi().await?;
 
             let peer = handle_connection_streams(node_id, send_stream, recv_stream);
+
+            peer.tx.send(Message::Ping(2));
 
             let cancel_token = peer.cancel_token.clone();
 

@@ -7,7 +7,7 @@ use ratatui::{
     style::Stylize,
     symbols::border,
     text::{Line, Text},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Block, Paragraph, Widget, Wrap},
 };
 use tui_widgets::prompts::{Prompt, TextPrompt};
 
@@ -128,6 +128,7 @@ impl<'a> App<'a> {
         );
 
         Paragraph::new(log_text)
+            .wrap(Wrap { trim: false })
             .block(block)
             .render(area, frame.buffer_mut());
     }

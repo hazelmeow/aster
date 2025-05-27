@@ -44,6 +44,10 @@ impl GroupMembership {
         self.acb.make_message(Operation::Add(node_id))
     }
 
+    pub fn remove_member(&mut self, node_id: NodeId) -> SignedMessage<Operation> {
+        self.acb.make_message(Operation::Remove(node_id))
+    }
+
     pub fn evaluate_members(&self) -> HashSet<NodeId> {
         let mut members = HashSet::new();
 
