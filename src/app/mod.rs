@@ -26,6 +26,7 @@ pub struct App<'a> {
     pub protocol: Arc<Protocol>,
 
     pub mode: AppMode,
+    pub screen: AppScreen,
 
     pub messages: Vec<String>,
 
@@ -33,8 +34,16 @@ pub struct App<'a> {
     pub protocol_state: ProtocolState,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AppScreen {
+    #[default]
+    Group,
+    Library,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppMode {
+    #[default]
     Default,
     Command,
 }
@@ -50,6 +59,8 @@ pub enum AppEvent {
 
     CommandMode,
     ExitMode,
+
+    Screen(AppScreen),
 
     PollProtocolState(ProtocolState),
 }
@@ -88,7 +99,8 @@ impl<'a> App<'a> {
             profile,
             protocol,
 
-            mode: AppMode::Default,
+            mode: AppMode::default(),
+            screen: AppScreen::default(),
 
             messages: Vec::new(),
 
@@ -122,6 +134,12 @@ impl<'a> App<'a> {
     /// Handles the key events and updates the state of [`App`].
     pub fn handle_key_events(&mut self, key_event: KeyEvent) -> anyhow::Result<()> {
         match (self.mode, key_event.code) {
+            // any mode
+
+            // change screens
+            (_, KeyCode::Char('1')) => self.events.send(AppEvent::Screen(AppScreen::Group)),
+            (_, KeyCode::Char('2')) => self.events.send(AppEvent::Screen(AppScreen::Library)),
+
             // default mode
 
             // : or / to enter command mode
@@ -194,6 +212,10 @@ impl<'a> App<'a> {
             AppEvent::ExitMode => {
                 self.mode = AppMode::Default;
                 self.command_state = TextState::default();
+            }
+
+            AppEvent::Screen(screen) => {
+                self.screen = screen;
             }
 
             AppEvent::PollProtocolState(state) => self.protocol_state = state,

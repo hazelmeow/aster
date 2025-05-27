@@ -1,13 +1,13 @@
 //! The app TUI.
 
-use crate::app::{App, AppMode};
+use crate::app::{App, AppMode, AppScreen};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::Stylize,
+    style::{Color, Stylize},
     symbols::border,
     text::{Line, Text},
-    widgets::{Block, Paragraph, Widget, Wrap},
+    widgets::{Block, Paragraph, Tabs, Widget, Wrap},
 };
 use tui_widgets::prompts::{Prompt, TextPrompt};
 
@@ -15,25 +15,86 @@ impl<'a> App<'a> {
     // we're using this instead of Widget::render because we also need the
     // frame to use TextPrompt
     pub fn render(&mut self, frame: &mut Frame) {
-        let area = frame.area();
+        use Constraint::{Length, Min};
 
-        let mut layout_contraints = vec![Constraint::Percentage(50), Constraint::Percentage(50)];
+        let [header_area, inner_area] = {
+            if self.mode == AppMode::Command {
+                let vertical = Layout::vertical([Length(1), Min(0), Length(3)]);
+                let [header_area, inner_area, command_area] = vertical.areas(frame.area());
 
-        if self.mode == AppMode::Command {
-            layout_contraints.push(Constraint::Length(3));
+                self.render_command(frame, command_area);
+
+                [header_area, inner_area]
+            } else {
+                let vertical = Layout::vertical([Length(1), Min(0)]);
+                let [header_area, inner_area] = vertical.areas(frame.area());
+
+                [header_area, inner_area]
+            }
+        };
+
+        let horizontal = Layout::horizontal([Min(0), Length(10)]);
+        let [tabs_area, title_area] = horizontal.areas(header_area);
+
+        // tabs
+        let selected_tab_index = match self.screen {
+            AppScreen::Group => 0,
+            AppScreen::Library => 1,
+        };
+        let titles = ["Group", "Library"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| {
+                if i == selected_tab_index {
+                    Line::from(vec![
+                        "[".blue().bold(),
+                        (i + 1).to_string().blue().bold(),
+                        "] ".blue().bold(),
+                        s.into(),
+                    ])
+                } else {
+                    Line::from(vec![
+                        "<".blue().bold(),
+                        (i + 1).to_string().blue().bold(),
+                        "> ".blue().bold(),
+                        s.into(),
+                    ])
+                }
+            })
+            .collect::<Vec<_>>();
+        Tabs::new(titles)
+            .select(None)
+            .padding("", "")
+            .divider(" ")
+            .render(tabs_area, frame.buffer_mut());
+
+        // title
+        "Aster ⁂".bold().render(title_area, frame.buffer_mut());
+
+        match self.screen {
+            AppScreen::Group => {
+                self.render_group_screen(frame, inner_area);
+            }
+            AppScreen::Library => {
+                self.render_library_screen(frame, inner_area);
+            }
         }
+    }
 
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(layout_contraints)
-            .split(area);
+    fn render_command(&mut self, frame: &mut Frame, area: Rect) {
+        let block = Block::bordered().border_set(border::THICK);
 
-        self.render_status(frame, layout[0]);
-        self.render_log(frame, layout[1]);
+        TextPrompt::from("Command")
+            .with_block(block)
+            .draw(frame, area, &mut self.command_state);
+    }
 
-        if self.mode == AppMode::Command {
-            self.render_command(frame, layout[2]);
-        }
+    fn render_group_screen(&mut self, frame: &mut Frame, area: Rect) {
+        let vertical = Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]);
+        let [status_area, log_area] = vertical.areas(area);
+
+        self.render_status(frame, status_area);
+        self.render_log(frame, log_area);
     }
 
     fn render_status(&self, frame: &mut Frame, area: Rect) {
@@ -143,11 +204,21 @@ impl<'a> App<'a> {
             .render(area, frame.buffer_mut());
     }
 
-    fn render_command(&mut self, frame: &mut Frame, area: Rect) {
-        let block = Block::bordered().border_set(border::THICK);
+    fn render_library_screen(&mut self, frame: &mut Frame, area: Rect) {
+        let title = Line::from(" Library ".bold());
+        let instructions = Line::from(vec![
+            " Command ".into(),
+            "<:>".blue().bold(),
+            " Quit ".into(),
+            "<Q> ".blue().bold(),
+        ]);
+        let block = Block::bordered()
+            .title(title.centered())
+            .title_bottom(instructions.left_aligned())
+            .border_set(border::THICK);
 
-        TextPrompt::from("Command")
-            .with_block(block)
-            .draw(frame, area, &mut self.command_state);
+        Paragraph::new(Line::from("todo"))
+            .block(block)
+            .render(area, frame.buffer_mut());
     }
 }
