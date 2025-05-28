@@ -134,6 +134,7 @@ pub fn handle_connection_streams(
     tokio::spawn({
         let cancel_token = cancel_token.clone();
         async move {
+            // TODO: should have length-prefixed framing
             let mut recv_buf = [0; 1024];
 
             loop {

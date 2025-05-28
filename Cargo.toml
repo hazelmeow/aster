@@ -22,7 +22,7 @@ ratatui = "0.29.0"
 serde = { version = "1.0.219", features = ["derive"] }
 stream-download = "0.21.0"
 tokio = "1.44.2"
-tokio-util = "0.7.15"
+tokio-util = { version = "0.7.15", features = ["io"] }
 tui-widgets = "0.4.1"
 
 [dev-dependencies]

@@ -574,7 +574,6 @@ impl Protocol {
 
                 // accept new streams for file transfers
                 Some(streams) = stream_accept_rx.recv() => {
-                    app_log!("accepted new stream");
                     tokio::spawn(async move {
                         let StreamAccept(send_stream, recv_stream) = streams;
 

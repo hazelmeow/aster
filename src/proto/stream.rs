@@ -1,7 +1,20 @@
-use crate::proto::Protocol;
+//! File streaming.
+//!
+//! Request flow:
+//! - A opens bidirectional stream with B
+//! - A sends init request length
+//! - A sends init request
+//! - B receives init request
+//! - B sends init response length
+//! - B sends init response
+//! - B starts sending file until end
+//! - A receives init response
+//! - A starts receiving file until end or seek
+
+use crate::{app::app_log, proto::Protocol};
 use anyhow::Context;
 use bytes::Bytes;
-use futures::Stream;
+use futures::{Stream, TryStreamExt};
 use iroh::{
     NodeId,
     endpoint::{RecvStream, SendStream},
@@ -9,7 +22,7 @@ use iroh::{
 use serde::{Deserialize, Serialize};
 use std::{io::Cursor, pin::Pin, sync::Arc};
 use stream_download::source::{DecodeError, SourceStream};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InitRequest {
@@ -45,29 +58,26 @@ pub async fn connect_stream(
     let init_req_buf =
         postcard::to_stdvec(&init_req).context("failed to serialize init request")?;
     send_stream
+        .write_u64(init_req_buf.len() as u64)
+        .await
+        .context("failed to write init request length")?;
+    send_stream
         .write_all(&init_req_buf)
         .await
         .context("failed to write init request")?;
 
     // receive init response
-    let mut init_res_buf = [0; 1024];
-    let init_res_bytes = recv_stream
-        .read(&mut init_res_buf)
+    let init_res_len = recv_stream.read_u64().await?;
+    let mut init_res_buf = vec![0; init_res_len as usize];
+    recv_stream
+        .read_exact(&mut init_res_buf)
         .await
         .context("failed to read init response")?;
-    let Some(init_res_bytes) = init_res_bytes else {
-        anyhow::bail!("stream finished unexpectedly");
-    };
-    let init_res: InitResponse = postcard::from_bytes(&init_res_buf[0..init_res_bytes])
-        .context("failed to deserialize init response")?;
+    let init_res: InitResponse =
+        postcard::from_bytes(&init_res_buf).context("failed to deserialize init response")?;
 
-    // read incoming bytes on recv_stream and convert to async stream
-    let stream = async_stream::try_stream! {
-        let mut chunk_buf = vec![0; 1024];
-        while let Some(n_bytes) = recv_stream.read(&mut chunk_buf).await? {
-            yield Bytes::from(Bytes::copy_from_slice(&chunk_buf[0..n_bytes]));
-        }
-    };
+    // read bytes from recv_stream and convert to async stream
+    let stream = tokio_util::io::ReaderStream::new(recv_stream).map_err(Into::into);
 
     Ok((init_res.content_length, Box::pin(stream)))
 }
@@ -80,24 +90,26 @@ pub async fn accept_stream(
     mut recv_stream: RecvStream,
 ) -> anyhow::Result<()> {
     // receive init request
-    let mut init_req_buf = [0; 1024];
-    let init_req_bytes = recv_stream
-        .read(&mut init_req_buf)
+    let init_req_len = recv_stream.read_u64().await?;
+    let mut init_req_buf = vec![0; init_req_len as usize];
+    recv_stream
+        .read_exact(&mut init_req_buf)
         .await
         .context("failed to read init request")?;
-    let Some(init_req_bytes) = init_req_bytes else {
-        anyhow::bail!("stream finished unexpectedly");
-    };
-    let init_req: InitRequest = postcard::from_bytes(&init_req_buf[0..init_req_bytes])
-        .context("failed to deserialize init request")?;
+    let init_req: InitRequest =
+        postcard::from_bytes(&init_req_buf).context("failed to deserialize init request")?;
 
-    // TODO: read content length
-    let content_length = 14046228;
+    // TODO: read actual content length
+    let content_length = 77184;
 
     // send init response
     let init_res = InitResponse { content_length };
     let init_res_buf =
         postcard::to_stdvec(&init_res).context("failed to serialize init response")?;
+    send_stream
+        .write_u64(init_res_buf.len() as u64)
+        .await
+        .context("failed to write init response length")?;
     send_stream
         .write_all(&init_res_buf)
         .await
@@ -105,6 +117,13 @@ pub async fn accept_stream(
 
     let start_pos = init_req.start;
     let end_pos = init_req.end.unwrap_or(content_length);
+
+    app_log!(
+        "[stream] streaming {} {}..{}",
+        init_req.file_hash,
+        start_pos,
+        end_pos
+    );
 
     // open reader
     let mut rdr = BufReader::new(Cursor::new(TEST_FILE));
@@ -118,15 +137,19 @@ pub async fn accept_stream(
     let len = end_pos - start_pos;
     let mut rdr = rdr.take(len);
 
-    // read chunks and write them to the stream until reader is finished
-    let mut buf = [0; 8192];
-    loop {
-        let n = rdr.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        };
-        send_stream.write_all(&buf[0..n]).await?;
-    }
+    // copy reader to stream
+    tokio::io::copy(&mut rdr, &mut send_stream).await?;
+
+    // wait for peer to receive everything
+    let _ = send_stream.finish();
+    let _ = send_stream.stopped().await;
+
+    app_log!(
+        "[stream] finished streaming {} {}..{}",
+        init_req.file_hash,
+        start_pos,
+        end_pos
+    );
 
     Ok(())
 }
