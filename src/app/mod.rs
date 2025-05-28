@@ -347,6 +347,25 @@ impl<'a> App<'a> {
                 });
             }
 
+            "p" => {
+                if parts.len() != 2 {
+                    anyhow::bail!("expected 1 argument");
+                }
+
+                let file_hash = parts[1].parse().context("failed to parse file hash")?;
+
+                app_log!("attempting to download {file_hash}");
+
+                let protocol = self.protocol.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = protocol.download_file(file_hash).await {
+                        app_log!("download failed: {e:#}");
+                    } else {
+                        app_log!("download success");
+                    }
+                });
+            }
+
             _ => {
                 anyhow::bail!("unknown command: {command}");
             }

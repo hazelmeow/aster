@@ -2,12 +2,16 @@ use crate::{
     app::app_log,
     proto::{ProtocolEvent, acb::SignedMessage, clock::Clock, dgm::Operation},
 };
+use anyhow::Context;
 use iroh::{
     NodeId,
-    endpoint::{RecvStream, SendStream},
+    endpoint::{Connection, RecvStream, SendStream},
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{
+    mpsc::{self, UnboundedReceiver, UnboundedSender},
+    oneshot,
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,19 +33,37 @@ pub enum Message {
     FileList(Vec<u64>),
 }
 
+struct StreamOpen(oneshot::Sender<anyhow::Result<(SendStream, RecvStream)>>);
+pub struct StreamAccept(pub SendStream, pub RecvStream);
+
 #[derive(Debug)]
 pub struct Peer {
-    pub tx: mpsc::UnboundedSender<Message>,
+    pub node_id: NodeId,
     pub cancel_token: CancellationToken,
+    pub tx: mpsc::UnboundedSender<Message>,
+
+    stream_open_tx: mpsc::UnboundedSender<StreamOpen>,
 }
 
 impl Peer {
+    pub fn close(&self) {
+        self.cancel_token.cancel();
+    }
+
     pub fn send(&self, message: Message) {
         let _ = self.tx.send(message);
     }
 
-    pub fn close(&self) {
-        self.cancel_token.cancel();
+    pub fn open_stream(&self) -> impl Future<Output = anyhow::Result<(SendStream, RecvStream)>> {
+        // only need a clone of stream_open_tx, so clone and move into a new future
+        // avoids holding peer mutex locked while waiting for stream
+        let stream_open_tx = self.stream_open_tx.clone();
+        Box::pin(async move {
+            let (stream_tx, stream_rx) = oneshot::channel();
+            let req = StreamOpen(stream_tx);
+            stream_open_tx.send(req)?;
+            stream_rx.await?
+        })
     }
 }
 
@@ -90,12 +112,21 @@ impl iroh::protocol::ProtocolHandler for SyncProtocol {
 // spawn tasks to bridge connection streams and message channels.
 // return the receiver separately since it can't be cloned
 pub fn handle_connection_streams(
-    node_id: NodeId,
+    connection: Connection,
     mut send_stream: SendStream,
     mut recv_stream: RecvStream,
-) -> (Peer, UnboundedReceiver<Message>) {
+) -> (
+    Peer,
+    UnboundedReceiver<Message>,
+    UnboundedReceiver<StreamAccept>,
+) {
+    let node_id = connection.remote_node_id().unwrap();
+
     let (send_tx, mut send_rx) = mpsc::unbounded_channel::<Message>();
     let (recv_tx, recv_rx) = mpsc::unbounded_channel::<Message>();
+
+    let (stream_open_tx, mut stream_open_rx) = mpsc::unbounded_channel::<StreamOpen>();
+    let (stream_accept_tx, stream_accept_rx) = mpsc::unbounded_channel::<StreamAccept>();
 
     let cancel_token = CancellationToken::new();
 
@@ -164,10 +195,53 @@ pub fn handle_connection_streams(
         }
     });
 
+    // spawn a task to own the connection to create streams and wait for closure
+    tokio::spawn({
+        let cancel_token = cancel_token.clone();
+        async move {
+            loop {
+                tokio::select! {
+                    // wait for requests for new streams
+                    Some(req) = stream_open_rx.recv() => {
+                        // open the stream and send it back to the requestor
+                        let res = connection.open_bi().await.context("failed to open stream");
+                        req.0.send(res).unwrap();
+                    }
+
+                    // accept new streams and send to main protocol
+                    res = connection.accept_bi() => {
+                        match res {
+                            Ok((send_stream, recv_stream)) => {
+                                stream_accept_tx.send(StreamAccept(send_stream, recv_stream)).unwrap();
+                            }
+                            Err(e) => {
+                                app_log!("error accepting stream: {e:#}");
+                            }
+                        }
+                    }
+
+                    // if the connection closes for any reason, cancel to start cleanup
+                    _ = connection.closed() => {
+                        cancel_token.cancel();
+                        break;
+                    }
+
+                    _ = cancel_token.cancelled() => {
+                        // explicitly close the connection
+                        connection.close(0u32.into(), b"closed");
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
     let peer = Peer {
-        tx: send_tx,
+        node_id,
         cancel_token,
+        tx: send_tx,
+        stream_open_tx,
     };
 
-    (peer, recv_rx)
+    (peer, recv_rx, stream_accept_rx)
 }

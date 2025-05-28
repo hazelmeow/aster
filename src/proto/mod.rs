@@ -4,22 +4,25 @@ mod acb;
 mod clock;
 mod dgm;
 pub(crate) mod join;
+mod stream;
 pub(crate) mod sync;
 
 use crate::{
     app::app_log,
     profile::Profile,
-    proto::{clock::Clock, join::JoinProtocol, sync::SyncProtocol},
+    proto::{clock::Clock, join::JoinProtocol, stream::ProtocolStream, sync::SyncProtocol},
 };
 use acb::{CausalBroadcast, SignedMessage};
 use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 use dgm::{GroupMembership, Operation};
-use iroh::{NodeAddr, NodeId, PublicKey, endpoint::Connection, protocol::Router};
+use iroh::{NodeAddr, NodeId, PublicKey, protocol::Router};
 use rand::Rng;
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
 };
+use stream_download::{StreamDownload, storage::temp::TempStorageProvider};
+use sync::StreamAccept;
 use tokio::sync::{
     Mutex,
     mpsc::{UnboundedReceiver, UnboundedSender},
@@ -367,7 +370,8 @@ impl Protocol {
         app_log!("[proto] [-> {node_id}] opened stream");
 
         // spawn tasks to bridge streams and channels
-        let (peer, mut msg_rx) = sync::handle_connection_streams(node_id, send_stream, recv_stream);
+        let (peer, mut msg_rx, stream_accept_rx) =
+            sync::handle_connection_streams(connection, send_stream, recv_stream);
 
         // send handshake message
         app_log!("[proto] [-> {node_id}] sending handshake");
@@ -397,7 +401,7 @@ impl Protocol {
         };
 
         // continue to connected state
-        self.sync_handshake_complete(connection, peer, msg_rx, remote_clock)
+        self.sync_handshake_complete(peer, msg_rx, stream_accept_rx, remote_clock)
             .await
     }
 
@@ -416,7 +420,8 @@ impl Protocol {
         app_log!("[proto] [-> {node_id}] accepted stream");
 
         // spawn tasks to bridge streams and channels
-        let (peer, mut msg_rx) = sync::handle_connection_streams(node_id, send_stream, recv_stream);
+        let (peer, mut msg_rx, stream_accept_rx) =
+            sync::handle_connection_streams(connection, send_stream, recv_stream);
 
         // wait for handshake message
         let handshake = msg_rx.recv().await;
@@ -516,7 +521,7 @@ impl Protocol {
         }
 
         // continue to connected state
-        self.sync_handshake_complete(connection, peer, msg_rx, remote_clock)
+        self.sync_handshake_complete(peer, msg_rx, stream_accept_rx, remote_clock)
             .await
     }
 
@@ -525,13 +530,12 @@ impl Protocol {
     // long-lived, should be spawned on a task
     async fn sync_handshake_complete(
         self: &Arc<Self>,
-        connection: Connection,
         peer: sync::Peer,
         mut msg_rx: UnboundedReceiver<sync::Message>,
+        mut stream_accept_rx: UnboundedReceiver<sync::StreamAccept>,
         remote_clock: Clock,
     ) -> anyhow::Result<()> {
-        // get the remote node id
-        let node_id = connection.remote_node_id()?;
+        let node_id = peer.node_id;
 
         let cancel_token = peer.cancel_token.clone();
 
@@ -548,6 +552,7 @@ impl Protocol {
 
         loop {
             tokio::select! {
+                // handle messages from peer
                 Some(msg) = msg_rx.recv() => {
                     match msg {
                         // deliver messages and reconcile connections
@@ -567,16 +572,23 @@ impl Protocol {
                     }
                 }
 
-                // if the connection closes for any reason, cancel to start cleanup
-                _ = connection.closed() => {
-                    cancel_token.cancel();
+                // accept new streams for file transfers
+                Some(streams) = stream_accept_rx.recv() => {
+                    app_log!("accepted new stream");
+                    tokio::spawn(async move {
+                        let StreamAccept(send_stream, recv_stream) = streams;
+
+                        tokio::spawn(async move {
+                            let res = stream::accept_stream(send_stream, recv_stream).await;
+                            if let Err(e) = res {
+                                app_log!("error while serving stream: {e:#}");
+                            }
+                        });
+                    });
                 }
 
-                // close connection when cancel token is cancelled
+                // clean up when cancel token is cancelled
                 _ = cancel_token.cancelled() => {
-                    // explicitly close the connection
-                    connection.close(0u32.into(), b"closed");
-
                     // remove from peer map
                     {
                         let mut peers = self.sync_peers.lock().await;
@@ -623,6 +635,70 @@ impl Protocol {
                 messages: messages.to_vec(),
             });
         }
+
+        Ok(())
+    }
+
+    pub async fn download_file(self: &Arc<Self>, file_hash: u64) -> anyhow::Result<()> {
+        // choose peer with file
+        let peer_id = {
+            // check if file is local
+            if self.local_files.contains(&file_hash) {
+                // TODO
+                anyhow::bail!("file is already local");
+            }
+
+            // get peers with file in index
+            let mut peers_with_file = {
+                let remote_files = self.remote_files.lock().await;
+
+                let Some(peers) = remote_files.get(&file_hash) else {
+                    anyhow::bail!("file not in index");
+                };
+
+                peers.clone()
+            };
+
+            if peers_with_file.is_empty() {
+                anyhow::bail!("file not in index");
+            }
+
+            // get connected peers
+            let connected_peers = {
+                let peers = self.sync_peers.lock().await;
+                peers.keys().copied().collect::<Vec<_>>()
+            };
+
+            // remove offline peers
+            peers_with_file.retain(|p| connected_peers.contains(p));
+
+            if peers_with_file.is_empty() {
+                anyhow::bail!("file in index, but not on any connected peer");
+            }
+
+            // TODO: could choose heuristically here. ex measure bandwidth
+            peers_with_file.iter().copied().next().unwrap()
+        };
+
+        app_log!("downloading {file_hash} from {peer_id}");
+
+        let mut reader = StreamDownload::new::<ProtocolStream>(
+            (self.clone(), peer_id, file_hash),
+            TempStorageProvider::new(),
+            stream_download::Settings::default(),
+        )
+        .await?;
+
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf)?;
+            app_log!("!!!finished reading, {}", buf.len());
+            Ok::<_, std::io::Error>(())
+        })
+        .await??;
+
+        app_log!("created streamdownload successfully");
 
         Ok(())
     }
