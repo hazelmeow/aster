@@ -20,19 +20,37 @@ impl<'a> App<'a> {
         use Constraint::{Length, Min};
 
         let [header_area, inner_area] = {
-            if self.mode == AppMode::Command {
-                let vertical = Layout::vertical([Length(1), Min(0), Length(3)]);
-                let [header_area, inner_area, command_area] = vertical.areas(frame.area());
+            let show_audio = self.audio_state.is_some();
+            let show_command = self.mode == AppMode::Command;
+
+            let mut constraints = vec![Length(1), Min(0)];
+            if show_audio {
+                constraints.push(Length(4));
+            }
+            if show_command {
+                constraints.push(Length(3))
+            }
+
+            let vertical = Layout::vertical(constraints);
+            let areas = vertical.split(frame.area());
+
+            let header_area = areas[0];
+            let inner_area = areas[1];
+
+            let mut next_area = 2;
+            if show_audio {
+                let audio_area = areas[next_area];
+                next_area += 1;
+
+                self.render_audio(frame, audio_area);
+            }
+            if show_command {
+                let command_area = areas[next_area];
 
                 self.render_command(frame, command_area);
-
-                [header_area, inner_area]
-            } else {
-                let vertical = Layout::vertical([Length(1), Min(0)]);
-                let [header_area, inner_area] = vertical.areas(frame.area());
-
-                [header_area, inner_area]
             }
+
+            [header_area, inner_area]
         };
 
         let horizontal = Layout::horizontal([Min(0), Length(10), Length(10)]);
@@ -88,6 +106,81 @@ impl<'a> App<'a> {
         }
     }
 
+    fn render_audio(&mut self, frame: &mut Frame, area: Rect) {
+        let state = self.audio_state.as_ref().unwrap();
+
+        let instructions = Line::from(vec![
+            " Pause ".into(),
+            "<p>".blue().bold(),
+            " Stop ".into(),
+            "<s>".blue().bold(),
+            " Seek ".into(),
+            "<← →>".blue().bold(),
+        ]);
+        let block = Block::bordered()
+            .title_top(instructions.right_aligned())
+            .border_set(border::THICK);
+
+        let status_line = {
+            let icon = if state.paused { '⏸' } else { '⏵' };
+
+            let elapsed_mins = (state.elapsed / 60.0).floor() as usize;
+            let elapsed_secs = (state.elapsed % 60.0).floor() as usize;
+            let elapsed = format!("{elapsed_mins}:{elapsed_secs:02}");
+
+            let duration_mins = (state.duration / 60.0).floor() as usize;
+            let duration_secs = (state.duration % 60.0).floor() as usize;
+            let duration = format!("{duration_mins}:{duration_secs:02}");
+
+            let source = if state.peer == self.protocol.router.endpoint().node_id() {
+                String::from("local library")
+            } else {
+                format!("streaming from {}", shorten_id(state.peer))
+            };
+
+            Line::from(vec![
+                " ".into(),
+                icon.to_string().blue(),
+                " ".into(),
+                elapsed.into(),
+                " / ".green(),
+                duration.into(),
+                " ".into(),
+                state.label.clone().into(),
+                " (".green(),
+                source.green(),
+                ")".green(),
+            ])
+        };
+
+        let progress_line = {
+            let width = area.width as usize - 6;
+            let percent = state.elapsed / state.duration;
+
+            let left_cap = String::from('┣').blue();
+
+            let left_n = ((width as f64 * percent).floor() as usize).min(width);
+            let left = std::iter::repeat_n('━', left_n).collect::<String>().blue();
+
+            let right_n = width - left_n;
+            let right = std::iter::repeat_n('━', right_n)
+                .collect::<String>()
+                .white();
+
+            let right_cap = if left_n == width {
+                String::from('┫').blue()
+            } else {
+                String::from('┫').white()
+            };
+
+            Line::from(vec![" ".into(), left_cap, left, right, right_cap])
+        };
+
+        Paragraph::new(vec![status_line, progress_line])
+            .block(block)
+            .render(area, frame.buffer_mut());
+    }
+
     fn render_command(&mut self, frame: &mut Frame, area: Rect) {
         let block = Block::bordered().border_set(border::THICK);
 
@@ -114,7 +207,7 @@ impl<'a> App<'a> {
         ]);
         let block = Block::bordered()
             .title(title.centered())
-            .title_bottom(instructions.left_aligned())
+            .title_top(instructions.right_aligned())
             .border_set(border::THICK);
 
         let home_relay = self
@@ -183,13 +276,8 @@ impl<'a> App<'a> {
         let title = Line::from(" Log ".bold());
         let block = Block::bordered()
             .title(title.centered())
-            // .title_bottom(instructions.right_aligned())
             .border_set(border::THICK);
 
-        // let log_text = Text::from(vec![Line::from(vec![
-        //     "Counter: ".into(),
-        //     self.counter.to_string().yellow(),
-        // ])]);
         let log_text = Text::from(
             self.messages
                 .iter()
@@ -206,6 +294,8 @@ impl<'a> App<'a> {
     fn render_library_screen(&mut self, frame: &mut Frame, area: Rect) {
         let title = Line::from(" Library ".bold());
         let instructions = Line::from(vec![
+            " Navigate ".into(),
+            "<↑ ↓ space>".blue().bold(),
             " Command ".into(),
             "<:>".blue().bold(),
             " Quit ".into(),
@@ -213,7 +303,7 @@ impl<'a> App<'a> {
         ]);
         let block = Block::bordered()
             .title(title.centered())
-            .title_bottom(instructions.left_aligned())
+            .title_top(instructions.right_aligned())
             .border_set(border::THICK);
 
         let mut tree_items = Vec::new();
@@ -327,9 +417,12 @@ impl<'a> App<'a> {
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
                     .end_symbol(None)
-                    .track_symbol(None),
+                    .track_symbol(None)
+                    .style(Color::Blue),
             ))
             .highlight_style(Style::new().fg(Color::Black).bg(Color::LightBlue))
+            .node_closed_symbol("⏵ ")
+            .node_open_symbol("⏷ ")
             .block(block);
 
         frame.render_stateful_widget(tree, area, &mut self.library_tree_state);

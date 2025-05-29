@@ -1,7 +1,7 @@
 //! Protocol logic.
 
 mod acb;
-mod audio;
+pub(crate) mod audio;
 mod clock;
 mod dgm;
 pub(crate) mod join;
@@ -12,6 +12,7 @@ use crate::{
     app::app_log,
     profile::Profile,
     proto::{
+        audio::AudioTrack,
         clock::Clock,
         join::JoinProtocol,
         stream::{LocalStream, ProtocolStream},
@@ -70,7 +71,7 @@ pub struct Protocol {
     local_files: Mutex<HashMap<String, BTreeSet<String>>>,
     remote_files: Mutex<HashMap<NodeId, HashMap<String, Vec<String>>>>,
 
-    audio: Audio,
+    pub audio: Audio,
 }
 
 /// Internal protocol events for signaling.
@@ -677,7 +678,18 @@ impl Protocol {
         peer_id: NodeId,
         file_path: String,
     ) -> anyhow::Result<()> {
-        let reader = if peer_id == self.router.endpoint().node_id() {
+        let is_local = peer_id == self.router.endpoint().node_id();
+
+        // last path segment
+        let label = file_path.split('/').next_back().unwrap();
+        // remove extension
+        let label = label
+            .rsplit_once('.')
+            .map(|x| x.0)
+            .unwrap_or(label)
+            .to_string();
+
+        let stream = if is_local {
             app_log!("[playback] streaming local file {file_path}");
 
             StreamDownload::new::<LocalStream>(
@@ -697,7 +709,11 @@ impl Protocol {
             .await?
         };
 
-        self.audio.play(reader);
+        self.audio.play(AudioTrack {
+            label,
+            peer_id,
+            stream,
+        });
 
         Ok(())
     }

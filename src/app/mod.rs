@@ -4,16 +4,16 @@ pub(crate) mod ui;
 use crate::{
     app::event::{Event, EventHandler, app_send},
     profile::Profile,
-    proto::{Protocol, ProtocolState, join::JoinProtocol},
+    proto::{Protocol, ProtocolState, audio::AudioState},
 };
 use anyhow::Context;
 use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
-use iroh::{NodeAddr, NodeId, protocol::Router};
+use iroh::{NodeAddr, NodeId};
 use ratatui::{
     DefaultTerminal,
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
 };
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 use tui_tree_widget::TreeState;
 use tui_widgets::prompts::{State, Status, TextState};
 
@@ -34,6 +34,7 @@ pub struct App<'a> {
     pub command_state: TextState<'a>,
     pub library_tree_state: TreeState<(NodeId, String, bool)>,
     pub protocol_state: ProtocolState,
+    pub audio_state: Option<AudioState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -65,6 +66,7 @@ pub enum AppEvent {
     Screen(AppScreen),
 
     PollProtocolState(ProtocolState),
+    PollAudioState(Option<AudioState>),
 }
 
 macro_rules! app_log {
@@ -109,6 +111,7 @@ impl<'a> App<'a> {
             command_state: TextState::default(),
             library_tree_state: TreeState::default(),
             protocol_state: ProtocolState::default(),
+            audio_state: None,
         })
     }
 
@@ -152,6 +155,22 @@ impl<'a> App<'a> {
                 // ctrl+c to quit
                 (_, KeyCode::Char('c' | 'C')) if key_event.modifiers == KeyModifiers::CONTROL => {
                     self.events.send(AppEvent::Exit)
+                }
+
+                // pause
+                (_, KeyCode::Char('p')) => {
+                    self.protocol.audio.pause();
+                } // stop
+                (_, KeyCode::Char('s')) => {
+                    self.protocol.audio.stop();
+                }
+
+                // seek
+                (_, KeyCode::Left) => {
+                    self.protocol.audio.seek_backward();
+                }
+                (_, KeyCode::Right) => {
+                    self.protocol.audio.seek_forward();
                 }
 
                 // library screen
@@ -263,6 +282,7 @@ impl<'a> App<'a> {
             }
 
             AppEvent::PollProtocolState(state) => self.protocol_state = state,
+            AppEvent::PollAudioState(state) => self.audio_state = state,
         }
         Ok(())
     }
