@@ -485,6 +485,11 @@ impl<'a> App<'a> {
                 "<↑> <↓> <PgUp> <PgDn> <Home> <End> <space>".blue(),
                 " to navigate.".into(),
             ]),
+            Line::from(vec![
+                " - ".into(),
+                "`:l <path>`".blue(),
+                " to add a library root.".into(),
+            ]),
             Line::from(""),
             Line::from("Playback".bold()),
             Line::from(vec![" - ".into(), "<p>".blue(), " to pause.".into()]),

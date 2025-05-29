@@ -718,7 +718,7 @@ impl Protocol {
         Ok(())
     }
 
-    async fn add_library_root(self: &Arc<Self>, root_path: PathBuf) -> anyhow::Result<()> {
+    pub async fn add_library_root(self: &Arc<Self>, root_path: PathBuf) -> anyhow::Result<()> {
         app_log!("[library] scanning {root_path:?}");
 
         let mut files = BTreeSet::new();

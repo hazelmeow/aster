@@ -414,6 +414,21 @@ impl<'a> App<'a> {
                 app_send!(AppEvent::Screen(AppScreen::Help));
             }
 
+            "l" => {
+                if parts.len() != 2 {
+                    anyhow::bail!("expected 1 argument");
+                }
+
+                let library_path = parts[1].parse().context("failed to parse path")?;
+
+                let protocol = self.protocol.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = protocol.add_library_root(library_path).await {
+                        app_log!("add library root failed: {e:#}");
+                    }
+                });
+            }
+
             _ => {
                 anyhow::bail!("unknown command: {command}");
             }
