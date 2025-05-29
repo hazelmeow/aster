@@ -103,7 +103,7 @@ pub async fn accept_stream(
         postcard::from_bytes(&init_req_buf).context("failed to deserialize init request")?;
 
     // ensure path is within library roots
-    if library_roots
+    if !library_roots
         .iter()
         .any(|r| init_req.file_path.starts_with(r))
     {
