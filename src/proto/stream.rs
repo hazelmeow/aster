@@ -58,7 +58,7 @@ pub async fn connect_stream(
     let init_req_buf =
         postcard::to_stdvec(&init_req).context("failed to serialize init request")?;
     send_stream
-        .write_u64(init_req_buf.len() as u64)
+        .write_u32(init_req_buf.len() as u32)
         .await
         .context("failed to write init request length")?;
     send_stream
@@ -67,7 +67,7 @@ pub async fn connect_stream(
         .context("failed to write init request")?;
 
     // receive init response
-    let init_res_len = recv_stream.read_u64().await?;
+    let init_res_len = recv_stream.read_u32().await?;
     let mut init_res_buf = vec![0; init_res_len as usize];
     recv_stream
         .read_exact(&mut init_res_buf)
@@ -90,7 +90,7 @@ pub async fn accept_stream(
     mut recv_stream: RecvStream,
 ) -> anyhow::Result<()> {
     // receive init request
-    let init_req_len = recv_stream.read_u64().await?;
+    let init_req_len = recv_stream.read_u32().await?;
     let mut init_req_buf = vec![0; init_req_len as usize];
     recv_stream
         .read_exact(&mut init_req_buf)
@@ -107,7 +107,7 @@ pub async fn accept_stream(
     let init_res_buf =
         postcard::to_stdvec(&init_res).context("failed to serialize init response")?;
     send_stream
-        .write_u64(init_res_buf.len() as u64)
+        .write_u32(init_res_buf.len() as u32)
         .await
         .context("failed to write init response length")?;
     send_stream
