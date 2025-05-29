@@ -14,6 +14,7 @@ use ratatui::{
     crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
 };
 use std::{collections::HashSet, sync::Arc};
+use tui_tree_widget::TreeState;
 use tui_widgets::prompts::{State, Status, TextState};
 
 /// Application.
@@ -31,6 +32,7 @@ pub struct App<'a> {
     pub messages: Vec<String>,
 
     pub command_state: TextState<'a>,
+    pub library_tree_state: TreeState<(NodeId, String, bool)>,
     pub protocol_state: ProtocolState,
 }
 
@@ -105,6 +107,7 @@ impl<'a> App<'a> {
             messages: Vec::new(),
 
             command_state: TextState::default(),
+            library_tree_state: TreeState::default(),
             protocol_state: ProtocolState::default(),
         })
     }
@@ -133,35 +136,74 @@ impl<'a> App<'a> {
 
     /// Handles the key events and updates the state of [`App`].
     pub fn handle_key_events(&mut self, key_event: KeyEvent) -> anyhow::Result<()> {
-        match (self.mode, key_event.code) {
-            // default mode
+        match self.mode {
+            AppMode::Default => match (self.screen, key_event.code) {
+                // : or / to enter command mode
+                (_, KeyCode::Char(':') | KeyCode::Char('/')) => {
+                    self.events.send(AppEvent::CommandMode)
+                }
 
-            // : or / to enter command mode
-            (AppMode::Default, KeyCode::Char(':') | KeyCode::Char('/')) => {
-                self.events.send(AppEvent::CommandMode)
-            }
+                // change screens
+                (_, KeyCode::Char('1')) => self.events.send(AppEvent::Screen(AppScreen::Group)),
+                (_, KeyCode::Char('2')) => self.events.send(AppEvent::Screen(AppScreen::Library)),
 
-            // change screens
-            (AppMode::Default, KeyCode::Char('1')) => {
-                self.events.send(AppEvent::Screen(AppScreen::Group))
-            }
-            (AppMode::Default, KeyCode::Char('2')) => {
-                self.events.send(AppEvent::Screen(AppScreen::Library))
-            }
+                // esc or q to quit
+                (_, KeyCode::Esc | KeyCode::Char('q')) => self.events.send(AppEvent::Exit),
+                // ctrl+c to quit
+                (_, KeyCode::Char('c' | 'C')) if key_event.modifiers == KeyModifiers::CONTROL => {
+                    self.events.send(AppEvent::Exit)
+                }
 
-            // esc or q to quit
-            (AppMode::Default, KeyCode::Esc | KeyCode::Char('q')) => {
-                self.events.send(AppEvent::Exit)
-            }
-            // ctrl+c to quit
-            (AppMode::Default, KeyCode::Char('c' | 'C'))
-                if key_event.modifiers == KeyModifiers::CONTROL =>
-            {
-                self.events.send(AppEvent::Exit)
-            }
+                // library screen
+                (AppScreen::Library, KeyCode::Enter | KeyCode::Char(' ')) => {
+                    self.library_tree_state.toggle_selected();
 
-            // command mode
-            (AppMode::Command, _) => {
+                    // if leaf, play selected song
+                    let last_selected = self.library_tree_state.selected().last();
+                    if let Some(last_selected) = last_selected {
+                        let is_leaf = last_selected.2;
+                        if is_leaf {
+                            let peer_id = last_selected.0;
+                            let file_path = last_selected.1.clone();
+
+                            let protocol = self.protocol.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = protocol.download_file(peer_id, file_path).await {
+                                    app_log!("download file failed: {e:#}");
+                                }
+                            });
+                        }
+                    }
+                }
+                (AppScreen::Library, KeyCode::Down | KeyCode::Char('j')) => {
+                    self.library_tree_state.key_down();
+                }
+                (AppScreen::Library, KeyCode::Up | KeyCode::Char('k')) => {
+                    self.library_tree_state.key_up();
+                }
+                (AppScreen::Library, KeyCode::Left | KeyCode::Char('h')) => {
+                    self.library_tree_state.key_left();
+                }
+                (AppScreen::Library, KeyCode::Right | KeyCode::Char('l')) => {
+                    self.library_tree_state.key_right();
+                }
+                (AppScreen::Library, KeyCode::Home) => {
+                    self.library_tree_state.select_first();
+                }
+                (AppScreen::Library, KeyCode::End) => {
+                    self.library_tree_state.select_last();
+                }
+                (AppScreen::Library, KeyCode::PageUp) => {
+                    self.library_tree_state.scroll_up(10);
+                }
+                (AppScreen::Library, KeyCode::PageDown) => {
+                    self.library_tree_state.scroll_down(10);
+                }
+
+                _ => {}
+            },
+
+            AppMode::Command => {
                 self.command_state.handle_key_event(key_event);
 
                 match self.command_state.status() {
@@ -178,9 +220,8 @@ impl<'a> App<'a> {
                     Status::Pending => {}
                 }
             }
-
-            _ => {}
         }
+
         Ok(())
     }
 
@@ -344,25 +385,6 @@ impl<'a> App<'a> {
                     };
 
                     app_log!("mutex members: {:?}", group.evaluate_members());
-                });
-            }
-
-            "p" => {
-                if parts.len() != 2 {
-                    anyhow::bail!("expected 1 argument");
-                }
-
-                let file_hash = parts[1].parse().context("failed to parse file hash")?;
-
-                app_log!("attempting to download {file_hash}");
-
-                let protocol = self.protocol.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = protocol.download_file(file_hash).await {
-                        app_log!("download failed: {e:#}");
-                    } else {
-                        app_log!("download success");
-                    }
                 });
             }
 

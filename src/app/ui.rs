@@ -5,11 +5,12 @@ use iroh::NodeId;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::Stylize,
+    style::{Color, Style, Stylize},
     symbols::border,
     text::{Line, Text},
-    widgets::{Block, Paragraph, Tabs, Widget, Wrap},
+    widgets::{Block, Paragraph, Scrollbar, ScrollbarOrientation, Tabs, Widget, Wrap},
 };
+use tui_tree_widget::{Tree, TreeItem};
 use tui_widgets::prompts::{Prompt, TextPrompt};
 
 impl<'a> App<'a> {
@@ -215,48 +216,111 @@ impl<'a> App<'a> {
             .title_bottom(instructions.left_aligned())
             .border_set(border::THICK);
 
-        let lines = std::iter::once(Line::from(vec![
-            "Local Files (".into(),
-            self.protocol_state.local_files.len().to_string().into(),
-            "):".into(),
-        ]))
-        .chain(
-            self.protocol_state
-                .local_files
-                .iter()
-                .map(|file_hash| Line::from(vec![" - ".into(), file_hash.to_string().into()])),
-        )
-        .chain(std::iter::once("".into()))
-        .chain(std::iter::once(Line::from(vec![
-            "Remote Files (".into(),
-            self.protocol_state.remote_files.len().to_string().into(),
-            "):".into(),
-        ])))
-        .chain(
-            self.protocol_state
-                .remote_files
-                .iter()
-                .map(|(file_hash, nodes)| {
-                    let nodes = nodes
-                        .iter()
-                        .copied()
-                        .map(shorten_id)
-                        .collect::<Vec<_>>()
-                        .join(", ");
+        let mut tree_items = Vec::new();
 
-                    Line::from(vec![
-                        " - ".into(),
-                        file_hash.to_string().into(),
-                        " on ".into(),
-                        nodes.into(),
-                    ])
-                }),
-        )
-        .collect::<Vec<_>>();
+        // local files
+        {
+            let local_id = self.protocol.router.endpoint().node_id();
 
-        Paragraph::new(lines)
-            .block(block)
-            .render(area, frame.buffer_mut());
+            let mut root = TreeItem::new_leaf((local_id, String::new(), false), "Local Files");
+
+            for file in &self.protocol_state.library_files {
+                let path_root = self
+                    .protocol_state
+                    .library_roots
+                    .iter()
+                    .map(|r| r.to_string_lossy().to_string())
+                    .find(|r| file.starts_with(r))
+                    .unwrap_or_else(|| "/".into());
+
+                let path_rest = file.strip_prefix(&path_root).unwrap_or(file);
+
+                let parts = std::iter::once(path_root).chain(
+                    path_rest
+                        .split('/')
+                        .filter(|p| !p.is_empty())
+                        .map(|p| p.to_string()),
+                );
+
+                let mut current_node = &mut root;
+                let mut current_path = String::new();
+                for part in parts {
+                    if !current_path.is_empty() {
+                        current_path.push('/');
+                    }
+                    current_path.push_str(&part);
+
+                    let next_idx = current_node.children().iter().position(|child| {
+                        child.identifier().0 == local_id && child.identifier().1 == current_path
+                    });
+
+                    if let Some(index) = next_idx {
+                        current_node = current_node.child_mut(index).unwrap();
+                    } else {
+                        let is_leaf = current_path == *file;
+                        let new_item =
+                            TreeItem::new_leaf((local_id, current_path.clone(), is_leaf), part);
+                        current_node.add_child(new_item).unwrap();
+                        current_node = current_node
+                            .child_mut(current_node.children().len() - 1)
+                            .unwrap();
+                    }
+                }
+            }
+
+            tree_items.push(root);
+        }
+
+        // remote files
+        for (remote_id, files) in self.protocol_state.remote_files.iter() {
+            let mut root = TreeItem::new_leaf(
+                (*remote_id, String::new(), false),
+                format!("Files on {remote_id}"),
+            );
+
+            for file in files {
+                let mut current_node = &mut root;
+                let mut current_path = String::new();
+                for part in file.split('/') {
+                    if !current_path.is_empty() {
+                        current_path.push('/');
+                    }
+                    current_path.push_str(part);
+
+                    let next_idx = current_node.children().iter().position(|child| {
+                        child.identifier().0 == *remote_id && child.identifier().1 == current_path
+                    });
+
+                    if let Some(index) = next_idx {
+                        current_node = current_node.child_mut(index).unwrap();
+                    } else {
+                        let is_leaf = current_path == *file;
+                        let new_item =
+                            TreeItem::new_leaf((*remote_id, current_path.clone(), is_leaf), part);
+                        current_node.add_child(new_item).unwrap();
+                        current_node = current_node
+                            .child_mut(current_node.children().len() - 1)
+                            .unwrap();
+                    }
+                }
+            }
+
+            tree_items.push(root);
+        }
+
+        // tree widget
+        let tree = Tree::new(&tree_items)
+            .unwrap()
+            .experimental_scrollbar(Some(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .track_symbol(None),
+            ))
+            .highlight_style(Style::new().fg(Color::Black).bg(Color::LightBlue))
+            .block(block);
+
+        frame.render_stateful_widget(tree, area, &mut self.library_tree_state);
     }
 }
 

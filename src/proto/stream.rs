@@ -26,7 +26,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InitRequest {
-    file_hash: u64,
+    file_path: String,
     start: u64,
     end: Option<u64>,
 }
@@ -42,7 +42,7 @@ struct InitResponse {
 pub async fn connect_stream(
     mut send_stream: SendStream,
     mut recv_stream: RecvStream,
-    file_hash: u64,
+    file_path: String,
     start: u64,
     end: Option<u64>,
 ) -> anyhow::Result<(
@@ -51,7 +51,7 @@ pub async fn connect_stream(
 )> {
     // send init request
     let init_req = InitRequest {
-        file_hash,
+        file_path,
         start,
         end,
     };
@@ -120,7 +120,7 @@ pub async fn accept_stream(
 
     app_log!(
         "[stream] streaming {} {}..{}",
-        init_req.file_hash,
+        init_req.file_path,
         start_pos,
         end_pos
     );
@@ -146,7 +146,7 @@ pub async fn accept_stream(
 
     app_log!(
         "[stream] finished streaming {} {}..{}",
-        init_req.file_hash,
+        init_req.file_path,
         start_pos,
         end_pos
     );
@@ -160,7 +160,7 @@ pub async fn accept_stream(
 pub struct ProtocolStream {
     protocol: Arc<Protocol>,
     peer_id: NodeId,
-    file_hash: u64,
+    file_path: String,
     content_length: u64,
     stream: Box<dyn Stream<Item = Result<Bytes, anyhow::Error>> + Send + Sync + Unpin>,
 }
@@ -179,11 +179,11 @@ impl Stream for ProtocolStream {
 }
 
 impl SourceStream for ProtocolStream {
-    type Params = (Arc<Protocol>, NodeId, u64);
+    type Params = (Arc<Protocol>, NodeId, String);
     type StreamCreationError = StreamDownloadError;
 
     async fn create(params: Self::Params) -> Result<Self, Self::StreamCreationError> {
-        let (protocol, peer_id, file_hash) = params;
+        let (protocol, peer_id, file_path) = params;
 
         // open stream with peer
         let (send_stream, recv_stream) = {
@@ -196,12 +196,12 @@ impl SourceStream for ProtocolStream {
 
         // connect, init, and create async stream
         let (content_length, stream) =
-            connect_stream(send_stream, recv_stream, file_hash, 0, None).await?;
+            connect_stream(send_stream, recv_stream, file_path.clone(), 0, None).await?;
 
         Ok(Self {
             protocol,
             peer_id,
-            file_hash,
+            file_path,
             content_length,
             stream: Box::new(stream),
         })
@@ -234,7 +234,7 @@ impl SourceStream for ProtocolStream {
 
         // create new stream with start and end
         let (_content_length, stream) =
-            connect_stream(send_stream, recv_stream, self.file_hash, start, end)
+            connect_stream(send_stream, recv_stream, self.file_path.clone(), start, end)
                 .await
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e))?;
 

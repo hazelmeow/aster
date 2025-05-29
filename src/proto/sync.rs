@@ -30,7 +30,7 @@ pub enum Message {
         messages: Vec<SignedMessage<Operation>>,
     },
 
-    FileList(Vec<u64>),
+    FileList(Vec<String>),
 }
 
 struct StreamOpen(oneshot::Sender<anyhow::Result<(SendStream, RecvStream)>>);

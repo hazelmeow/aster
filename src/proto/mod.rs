@@ -13,12 +13,13 @@ use crate::{
     proto::{clock::Clock, join::JoinProtocol, stream::ProtocolStream, sync::SyncProtocol},
 };
 use acb::{CausalBroadcast, SignedMessage};
+use anyhow::Context;
 use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 use dgm::{GroupMembership, Operation};
 use iroh::{NodeAddr, NodeId, PublicKey, protocol::Router};
-use rand::Rng;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
+    path::PathBuf,
     sync::Arc,
 };
 use stream_download::{StreamDownload, storage::temp::TempStorageProvider};
@@ -35,8 +36,9 @@ use tokio::sync::{
 pub struct ProtocolState {
     pub peers: Vec<NodeId>,
     pub group: Option<ProtocolGroupState>,
-    pub local_files: Vec<u64>,
-    pub remote_files: HashMap<u64, HashSet<NodeId>>,
+    pub library_roots: Vec<PathBuf>,
+    pub library_files: BTreeSet<String>,
+    pub remote_files: HashMap<NodeId, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -59,8 +61,9 @@ pub struct Protocol {
 
     sync_peers: Arc<Mutex<HashMap<NodeId, sync::Peer>>>, // TODO: remove arc
 
-    local_files: Vec<u64>,
-    remote_files: Mutex<HashMap<u64, HashSet<NodeId>>>,
+    library_roots: Mutex<Vec<PathBuf>>,
+    library_files: Mutex<BTreeSet<String>>,
+    remote_files: Mutex<HashMap<NodeId, Vec<String>>>,
 }
 
 /// Internal protocol events for signaling.
@@ -70,7 +73,7 @@ pub enum ProtocolEvent {
     SyncConnection(iroh::endpoint::Connection),
     SyncMessages(Vec<SignedMessage<Operation>>),
 
-    RemoteFiles(NodeId, Vec<u64>),
+    RemoteFiles(NodeId, Vec<String>),
 }
 
 impl Protocol {
@@ -108,12 +111,14 @@ impl Protocol {
 
             sync_peers,
 
-            local_files: std::iter::repeat_with(|| rand::thread_rng().r#gen())
-                .take(5)
-                .collect(),
+            library_roots: Mutex::new(vec![]),
+            library_files: Mutex::new(BTreeSet::new()),
             remote_files: Mutex::new(HashMap::new()),
+
+            audio,
         });
 
+        // handle protocol events
         tokio::spawn({
             let protocol = protocol.clone();
             async move {
@@ -163,9 +168,7 @@ impl Protocol {
                                 async move {
                                     let mut remote_files = protocol.remote_files.lock().await;
 
-                                    for file_hash in files {
-                                        remote_files.entry(file_hash).or_default().insert(peer_id);
-                                    }
+                                    remote_files.insert(peer_id, files);
                                 }
                             });
                             Ok(())
@@ -202,7 +205,7 @@ impl Protocol {
                 bytes[0..32].copy_from_slice(node_id.as_bytes());
                 bytes[32..40].copy_from_slice(&code.to_be_bytes());
 
-                BASE64_STANDARD_NO_PAD.encode(&bytes)
+                BASE64_STANDARD_NO_PAD.encode(bytes)
             };
 
             let group = self.group.lock().await;
@@ -213,7 +216,14 @@ impl Protocol {
             })
         };
 
-        let local_files = self.local_files.clone();
+        let library_roots = {
+            let library_roots = self.library_roots.lock().await;
+            library_roots.clone()
+        };
+        let library_files = {
+            let library_files = self.library_files.lock().await;
+            library_files.clone()
+        };
         let remote_files = {
             let remote_files = self.remote_files.lock().await;
             remote_files.clone()
@@ -222,7 +232,8 @@ impl Protocol {
         Ok(ProtocolState {
             peers,
             group,
-            local_files,
+            library_roots,
+            library_files,
             remote_files,
         })
     }
@@ -540,7 +551,11 @@ impl Protocol {
         let cancel_token = peer.cancel_token.clone();
 
         // send local files
-        peer.send(sync::Message::FileList(self.local_files.clone()));
+        let library_files = {
+            let library_files = self.library_files.lock().await;
+            library_files.iter().cloned().collect()
+        };
+        peer.send(sync::Message::FileList(library_files));
 
         // TODO: initiate sync w known remote_clock from handshake
 
@@ -638,51 +653,19 @@ impl Protocol {
         Ok(())
     }
 
-    pub async fn download_file(self: &Arc<Self>, file_hash: u64) -> anyhow::Result<()> {
-        // choose peer with file
-        let peer_id = {
-            // check if file is local
-            if self.local_files.contains(&file_hash) {
-                // TODO
-                anyhow::bail!("file is already local");
+    pub async fn download_file(
+        self: &Arc<Self>,
+        peer_id: NodeId,
+        file_path: String,
+    ) -> anyhow::Result<()> {
+        if peer_id == self.router.endpoint().node_id() {
+            anyhow::bail!("local files not implemented");
             }
 
-            // get peers with file in index
-            let mut peers_with_file = {
-                let remote_files = self.remote_files.lock().await;
-
-                let Some(peers) = remote_files.get(&file_hash) else {
-                    anyhow::bail!("file not in index");
-                };
-
-                peers.clone()
-            };
-
-            if peers_with_file.is_empty() {
-                anyhow::bail!("file not in index");
-            }
-
-            // get connected peers
-            let connected_peers = {
-                let peers = self.sync_peers.lock().await;
-                peers.keys().copied().collect::<Vec<_>>()
-            };
-
-            // remove offline peers
-            peers_with_file.retain(|p| connected_peers.contains(p));
-
-            if peers_with_file.is_empty() {
-                anyhow::bail!("file in index, but not on any connected peer");
-            }
-
-            // TODO: could choose heuristically here. ex measure bandwidth
-            peers_with_file.iter().copied().next().unwrap()
-        };
-
-        app_log!("downloading {file_hash} from {peer_id}");
+        app_log!("downloading {file_path} from {peer_id}");
 
         let mut reader = StreamDownload::new::<ProtocolStream>(
-            (self.clone(), peer_id, file_hash),
+            (self.clone(), peer_id, file_path),
             TempStorageProvider::new(),
             stream_download::Settings::default(),
         )
@@ -697,7 +680,48 @@ impl Protocol {
         })
         .await??;
 
-        app_log!("created streamdownload successfully");
+        Ok(())
+    }
+
+    async fn add_library_root(self: &Arc<Self>, path: PathBuf) -> anyhow::Result<()> {
+        // add to roots list
+        {
+            let mut library_roots = self.library_roots.lock().await;
+            if library_roots.contains(&path) {
+                anyhow::bail!("already a library root");
+            }
+            library_roots.push(path.clone());
+        }
+
+        app_log!("[library] scanning {path:?}");
+
+        let mut files = Vec::new();
+
+        let pattern = {
+            let mut p = path.to_string_lossy().into_owned();
+            p.push_str("/**/*.*");
+            p
+        };
+
+        // scan files
+        for entry in glob::glob(&pattern).context("failed to read glob pattern")? {
+            match entry {
+                Ok(path) => {
+                    files.push(path.to_string_lossy().into_owned());
+                }
+                Err(e) => {
+                    app_log!("[library] error scanning: {e:#}");
+                }
+            }
+        }
+
+        app_log!("[library] found {} files", files.len());
+
+        // extend list
+        {
+            let mut library_files = self.library_files.lock().await;
+            library_files.extend(files);
+    }
 
         Ok(())
     }

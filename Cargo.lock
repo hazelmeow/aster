@@ -131,6 +131,7 @@ dependencies = [
  "env_filter",
  "futures",
  "futures-util",
+ "glob",
  "iroh",
  "iroh-base",
  "log",
@@ -142,6 +143,7 @@ dependencies = [
  "stream-download",
  "tokio",
  "tokio-util",
+ "tui-tree-widget",
  "tui-widgets",
 ]
 
@@ -4056,6 +4058,15 @@ dependencies = [
  "indoc",
  "ratatui",
  "rstest",
+]
+
+[[package]]
+name = "tui-tree-widget"
+version = "0.23.0"
+source = "git+https://github.com/hazelmeow/tui-rs-tree-widget?branch=remove-default-bound#4036079212eeedabd015ff484d237304503fc559"
+dependencies = [
+ "ratatui",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
