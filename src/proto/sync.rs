@@ -3,6 +3,7 @@ use crate::{
     proto::{ProtocolEvent, acb::SignedMessage, clock::Clock, dgm::Operation},
 };
 use anyhow::Context;
+use futures::{SinkExt, StreamExt};
 use iroh::{
     NodeId,
     endpoint::{Connection, RecvStream, SendStream},
@@ -12,7 +13,10 @@ use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
     oneshot,
 };
-use tokio_util::sync::CancellationToken;
+use tokio_util::{
+    codec::{FramedRead, FramedWrite, LengthDelimitedCodec},
+    sync::CancellationToken,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
@@ -134,25 +138,25 @@ pub fn handle_connection_streams(
     tokio::spawn({
         let cancel_token = cancel_token.clone();
         async move {
-            // TODO: should have length-prefixed framing
-            let mut recv_buf = [0; 1024];
+            // wrap recv_stream in length delimited codec
+            let mut transport = FramedRead::new(recv_stream, LengthDelimitedCodec::new());
 
             loop {
                 tokio::select! {
-                    res = recv_stream.read(&mut recv_buf) => {
+                    res = transport.next() => {
                         match res {
-                            Ok(Some(n)) => {
-                                let msg: Message = postcard::from_bytes(&recv_buf[0..n]).unwrap();
+                            Some(Ok(bytes)) => {
+                                let msg: Message = postcard::from_bytes(&bytes).unwrap();
                                 // app_log!("[proto] got message from {node_id}: {msg:?}");
                                 recv_tx.send(msg).unwrap();
                             }
-                            Ok(None) => {
-                                // stream finished
+                            Some(Err(e)) => {
+                                app_log!("[proto] recv stream error: {}", e.to_string());
                                 cancel_token.cancel();
                                 break;
                             }
-                            Err(e) => {
-                                app_log!("[proto] recv stream error: {}", e.to_string());
+                            None => {
+                                // stream finished
                                 cancel_token.cancel();
                                 break;
                             }
@@ -171,6 +175,9 @@ pub fn handle_connection_streams(
     tokio::spawn({
         let cancel_token = cancel_token.clone();
         async move {
+            // wrap send_stream in length delimited codec
+            let mut transport = FramedWrite::new(send_stream, LengthDelimitedCodec::new());
+
             loop {
                 tokio::select! {
                     res = send_rx.recv() => {
@@ -178,7 +185,7 @@ pub fn handle_connection_streams(
                             Some(msg) => {
                                 // app_log!("[proto] sending message to {node_id}: {msg:?}");
                                 let buf = postcard::to_stdvec(&msg).unwrap();
-                                send_stream.write_all(&buf).await.unwrap();
+                                transport.send(buf.into()).await.unwrap();
                             }
                             None => {
                                 // channel closed
@@ -188,7 +195,7 @@ pub fn handle_connection_streams(
                     }
 
                     _ = cancel_token.cancelled() => {
-                        let _ = send_stream.finish();
+                        let _ = transport.into_inner().finish();
                         break;
                     }
                 }
