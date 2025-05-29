@@ -60,25 +60,22 @@ impl<'a> App<'a> {
         let selected_tab_index = match self.screen {
             AppScreen::Group => 0,
             AppScreen::Library => 1,
+            AppScreen::Help => 2,
         };
-        let titles = ["Group", "Library"]
+        let titles = ["Group", "Library", "Help"]
             .into_iter()
             .enumerate()
             .map(|(i, s)| {
-                if i == selected_tab_index {
-                    Line::from(vec![
-                        "[".blue().bold(),
-                        (i + 1).to_string().blue().bold(),
-                        "] ".blue().bold(),
-                        s.into(),
-                    ])
+                let key = if s == "Help" {
+                    "?".blue().bold()
                 } else {
-                    Line::from(vec![
-                        "<".blue().bold(),
-                        (i + 1).to_string().blue().bold(),
-                        "> ".blue().bold(),
-                        s.into(),
-                    ])
+                    (i + 1).to_string().blue().bold()
+                };
+
+                if i == selected_tab_index {
+                    Line::from(vec!["[".blue().bold(), key, "] ".blue().bold(), s.into()])
+                } else {
+                    Line::from(vec!["<".blue().bold(), key, "> ".blue().bold(), s.into()])
                 }
             })
             .collect::<Vec<_>>();
@@ -103,6 +100,9 @@ impl<'a> App<'a> {
             AppScreen::Library => {
                 self.render_library_screen(frame, inner_area);
             }
+            AppScreen::Help => {
+                self.render_help_screen(frame, inner_area);
+            }
         }
     }
 
@@ -115,7 +115,7 @@ impl<'a> App<'a> {
             " Stop ".into(),
             "<s>".blue().bold(),
             " Seek ".into(),
-            "<← →>".blue().bold(),
+            "<shift + ←/→>".blue().bold(),
         ]);
         let block = Block::bordered()
             .title_top(instructions.right_aligned())
@@ -203,7 +203,7 @@ impl<'a> App<'a> {
             " Command ".into(),
             "<:>".blue().bold(),
             " Quit ".into(),
-            "<Q> ".blue().bold(),
+            "<q> ".blue().bold(),
         ]);
         let block = Block::bordered()
             .title(title.centered())
@@ -293,17 +293,21 @@ impl<'a> App<'a> {
 
     fn render_library_screen(&mut self, frame: &mut Frame, area: Rect) {
         let title = Line::from(" Library ".bold());
-        let instructions = Line::from(vec![
-            " Navigate ".into(),
-            "<↑ ↓ space>".blue().bold(),
+        let top_instructions = Line::from(vec![
             " Command ".into(),
             "<:>".blue().bold(),
             " Quit ".into(),
-            "<Q> ".blue().bold(),
+            "<q> ".blue().bold(),
+        ]);
+        let bottom_instructions = Line::from(vec![
+            " Navigate ".into(),
+            "<↑ ↓ space>".blue().bold(),
+            //
         ]);
         let block = Block::bordered()
             .title(title.centered())
-            .title_top(instructions.right_aligned())
+            .title_top(top_instructions.right_aligned())
+            .title_bottom(bottom_instructions.right_aligned())
             .border_set(border::THICK);
 
         let mut tree_items = Vec::new();
@@ -426,6 +430,75 @@ impl<'a> App<'a> {
             .block(block);
 
         frame.render_stateful_widget(tree, area, &mut self.library_tree_state);
+    }
+
+    fn render_help_screen(&mut self, frame: &mut Frame, area: Rect) {
+        let title = Line::from(" Help ".bold());
+        let instructions = Line::from(vec![
+            " Command ".into(),
+            "<:>".blue().bold(),
+            " Quit ".into(),
+            "<q> ".blue().bold(),
+        ]);
+        let block = Block::bordered()
+            .title(title.centered())
+            .title_top(instructions.right_aligned())
+            .border_set(border::THICK);
+
+        let lines = vec![
+            Line::from("Navigation".bold()),
+            Line::from(vec![
+                " - ".into(),
+                "<1>".blue(),
+                " and ".into(),
+                "<2>".blue(),
+                " to change screens.".into(),
+            ]),
+            Line::from(vec![
+                " - ".into(),
+                "<:>".blue(),
+                " to open the command prompt.".into(),
+            ]),
+            Line::from(vec![
+                " - ".into(),
+                "<q>".blue(),
+                " or ".into(),
+                "<ctrl + c>".blue(),
+                " to quit.".into(),
+            ]),
+            Line::from(""),
+            Line::from("Group Management".bold()),
+            Line::from(vec![
+                " - ".into(),
+                "`:cg`".blue(),
+                " to create a group.".into(),
+            ]),
+            Line::from(vec![
+                " - ".into(),
+                "`:join <join code>`".blue(),
+                " to join a group.".into(),
+            ]),
+            Line::from(""),
+            Line::from("Library Screen".bold()),
+            Line::from(vec![
+                " - ".into(),
+                "<↑> <↓> <PgUp> <PgDn> <Home> <End> <space>".blue(),
+                " to navigate.".into(),
+            ]),
+            Line::from(""),
+            Line::from("Playback".bold()),
+            Line::from(vec![" - ".into(), "<p>".blue(), " to pause.".into()]),
+            Line::from(vec![" - ".into(), "<s>".blue(), " to stop.".into()]),
+            Line::from(vec![
+                " - ".into(),
+                "<shift + ←> <shift + →>".blue(),
+                " to seek.".into(),
+            ]),
+        ];
+
+        Paragraph::new(lines)
+            .block(block)
+            .render(area, frame.buffer_mut());
     }
 }
 

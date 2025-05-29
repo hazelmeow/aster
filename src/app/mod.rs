@@ -42,6 +42,7 @@ pub enum AppScreen {
     #[default]
     Group,
     Library,
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -149,6 +150,7 @@ impl<'a> App<'a> {
                 // change screens
                 (_, KeyCode::Char('1')) => self.events.send(AppEvent::Screen(AppScreen::Group)),
                 (_, KeyCode::Char('2')) => self.events.send(AppEvent::Screen(AppScreen::Library)),
+                (_, KeyCode::Char('?')) => self.events.send(AppEvent::Screen(AppScreen::Help)),
 
                 // esc or q to quit
                 (_, KeyCode::Esc | KeyCode::Char('q')) => self.events.send(AppEvent::Exit),
@@ -166,10 +168,10 @@ impl<'a> App<'a> {
                 }
 
                 // seek
-                (_, KeyCode::Left) => {
+                (_, KeyCode::Left) if key_event.modifiers == KeyModifiers::SHIFT => {
                     self.protocol.audio.seek_backward();
                 }
-                (_, KeyCode::Right) => {
+                (_, KeyCode::Right) if key_event.modifiers == KeyModifiers::SHIFT => {
                     self.protocol.audio.seek_forward();
                 }
 
@@ -406,6 +408,10 @@ impl<'a> App<'a> {
 
                     app_log!("mutex members: {:?}", group.evaluate_members());
                 });
+            }
+
+            "h" | "help" | "?" => {
+                app_send!(AppEvent::Screen(AppScreen::Help));
             }
 
             _ => {
