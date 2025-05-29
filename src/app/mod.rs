@@ -168,7 +168,7 @@ impl<'a> App<'a> {
 
                             let protocol = self.protocol.clone();
                             tokio::spawn(async move {
-                                if let Err(e) = protocol.download_file(peer_id, file_path).await {
+                                if let Err(e) = protocol.play_file(peer_id, file_path).await {
                                     app_log!("download file failed: {e:#}");
                                 }
                             });

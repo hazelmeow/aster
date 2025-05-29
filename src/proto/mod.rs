@@ -1,6 +1,7 @@
 //! Protocol logic.
 
 mod acb;
+mod audio;
 mod clock;
 mod dgm;
 pub(crate) mod join;
@@ -10,10 +11,16 @@ pub(crate) mod sync;
 use crate::{
     app::app_log,
     profile::Profile,
-    proto::{clock::Clock, join::JoinProtocol, stream::{LocalStream, ProtocolStream}, sync::SyncProtocol},
+    proto::{
+        clock::Clock,
+        join::JoinProtocol,
+        stream::{LocalStream, ProtocolStream},
+        sync::SyncProtocol,
+    },
 };
 use acb::{CausalBroadcast, SignedMessage};
 use anyhow::Context;
+use audio::Audio;
 use base64::{Engine, prelude::BASE64_STANDARD_NO_PAD};
 use dgm::{GroupMembership, Operation};
 use iroh::{NodeAddr, NodeId, PublicKey, protocol::Router};
@@ -64,6 +71,8 @@ pub struct Protocol {
     library_roots: Mutex<Vec<PathBuf>>,
     library_files: Mutex<BTreeSet<String>>,
     remote_files: Mutex<HashMap<NodeId, Vec<String>>>,
+
+    audio: Audio,
 }
 
 /// Internal protocol events for signaling.
@@ -99,6 +108,9 @@ impl Protocol {
             .accept(JoinProtocol::ALPN, join.clone())
             .spawn()
             .await?;
+
+        // create audio thread
+        let audio = Audio::new()?;
 
         let protocol = Arc::new(Self {
             router,
@@ -653,12 +665,12 @@ impl Protocol {
         Ok(())
     }
 
-    pub async fn download_file(
+    pub async fn play_file(
         self: &Arc<Self>,
         peer_id: NodeId,
         file_path: String,
     ) -> anyhow::Result<()> {
-        let mut reader = if peer_id == self.router.endpoint().node_id() {
+        let reader = if peer_id == self.router.endpoint().node_id() {
             app_log!("[playback] streaming local file {file_path}");
 
             StreamDownload::new::<LocalStream>(
@@ -678,14 +690,7 @@ impl Protocol {
             .await?
         };
 
-        tokio::task::spawn_blocking(move || {
-            use std::io::Read;
-            let mut buf = Vec::new();
-            reader.read_to_end(&mut buf)?;
-            app_log!("!!!finished reading, {}", buf.len());
-            Ok::<_, std::io::Error>(())
-        })
-        .await??;
+        self.audio.play(reader);
 
         Ok(())
     }
