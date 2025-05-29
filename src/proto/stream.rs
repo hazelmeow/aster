@@ -90,6 +90,7 @@ pub async fn connect_stream(
 pub async fn accept_stream(
     mut send_stream: SendStream,
     mut recv_stream: RecvStream,
+    library_roots: Vec<String>,
 ) -> anyhow::Result<()> {
     // receive init request
     let init_req_len = recv_stream.read_u32().await?;
@@ -101,8 +102,15 @@ pub async fn accept_stream(
     let init_req: InitRequest =
         postcard::from_bytes(&init_req_buf).context("failed to deserialize init request")?;
 
+    // ensure path is within library roots
+    if library_roots
+        .iter()
+        .any(|r| init_req.file_path.starts_with(r))
+    {
+        anyhow::bail!("requested path is not in a library root");
+    }
+
     // open file
-    // TODO: ensure path is within library roots
     let mut file = File::open(&init_req.file_path)
         .await
         .context("failed to open file")?;

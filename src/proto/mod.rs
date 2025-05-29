@@ -596,15 +596,20 @@ impl Protocol {
 
                 // accept new streams for file transfers
                 Some(streams) = stream_accept_rx.recv() => {
+                    let protocol = self.clone();
                     tokio::spawn(async move {
                         let StreamAccept(send_stream, recv_stream) = streams;
 
-                        tokio::spawn(async move {
-                            let res = stream::accept_stream(send_stream, recv_stream).await;
+                        // get library roots
+                        let library_roots = {
+                            let local_files = protocol.local_files.lock().await;
+                            local_files.keys().cloned().collect()
+                        };
+
+                        let res = stream::accept_stream(send_stream, recv_stream, library_roots).await;
                             if let Err(e) = res {
                                 app_log!("error while serving stream: {e:#}");
                             }
-                        });
                     });
                 }
 
