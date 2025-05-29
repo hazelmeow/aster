@@ -222,90 +222,102 @@ impl<'a> App<'a> {
         {
             let local_id = self.protocol.router.endpoint().node_id();
 
-            let mut root = TreeItem::new_leaf((local_id, String::new(), false), "Local Files");
+            let mut root_item = TreeItem::new_leaf((local_id, String::new(), false), "Local Files");
 
-            for file in &self.protocol_state.library_files {
-                let path_root = self
-                    .protocol_state
-                    .library_roots
-                    .iter()
-                    .map(|r| r.to_string_lossy().to_string())
-                    .find(|r| file.starts_with(r))
-                    .unwrap_or_else(|| "/".into());
+            for (path_root, files) in &self.protocol_state.local_files {
+                for file in files {
+                    let mut parts = std::iter::once(path_root.as_str())
+                        .chain(file.split('/').filter(|p| !p.is_empty()))
+                        .peekable();
 
-                let path_rest = file.strip_prefix(&path_root).unwrap_or(file);
+                    let mut current_item = &mut root_item;
+                    let mut current_path = String::new();
+                    while let Some(part) = parts.next() {
+                        // separate parts with /
+                        if !current_path.is_empty() {
+                            current_path.push('/');
+                        }
+                        // accumulate full path
+                        current_path.push_str(part);
 
-                let parts = std::iter::once(path_root).chain(
-                    path_rest
-                        .split('/')
-                        .filter(|p| !p.is_empty())
-                        .map(|p| p.to_string()),
-                );
+                        // find existing child with matching path
+                        let next_idx = current_item.children().iter().position(|child| {
+                            child.identifier().0 == local_id && child.identifier().1 == current_path
+                        });
 
-                let mut current_node = &mut root;
-                let mut current_path = String::new();
-                for part in parts {
-                    if !current_path.is_empty() {
-                        current_path.push('/');
-                    }
-                    current_path.push_str(&part);
+                        if let Some(index) = next_idx {
+                            // item exists, recurse
+                            current_item = current_item.child_mut(index).unwrap();
+                        } else {
+                            // item does not exist, create a new item
+                            let is_leaf = parts.peek().is_none();
+                            let new_item =
+                                TreeItem::new_leaf((local_id, current_path.clone(), is_leaf), part);
 
-                    let next_idx = current_node.children().iter().position(|child| {
-                        child.identifier().0 == local_id && child.identifier().1 == current_path
-                    });
-
-                    if let Some(index) = next_idx {
-                        current_node = current_node.child_mut(index).unwrap();
-                    } else {
-                        let is_leaf = current_path == *file;
-                        let new_item =
-                            TreeItem::new_leaf((local_id, current_path.clone(), is_leaf), part);
-                        current_node.add_child(new_item).unwrap();
-                        current_node = current_node
-                            .child_mut(current_node.children().len() - 1)
-                            .unwrap();
+                            // recurse
+                            current_item.add_child(new_item).unwrap();
+                            current_item = current_item
+                                .child_mut(current_item.children().len() - 1)
+                                .unwrap();
+                        }
                     }
                 }
             }
 
-            tree_items.push(root);
+            tree_items.push(root_item);
         }
 
         // remote files
-        for (remote_id, files) in self.protocol_state.remote_files.iter() {
-            let mut root = TreeItem::new_leaf(
+        for (remote_id, remote_roots) in self.protocol_state.remote_files.iter() {
+            let mut root_item = TreeItem::new_leaf(
                 (*remote_id, String::new(), false),
-                format!("Files on {remote_id}"),
+                format!("Remote Files on {remote_id}"),
             );
 
-            for file in files {
-                let mut current_node = &mut root;
-                let mut current_path = String::new();
-                for part in file.split('/') {
-                    if !current_path.is_empty() {
-                        current_path.push('/');
-                    }
-                    current_path.push_str(part);
+            for (path_root, files) in remote_roots {
+                for file in files {
+                    let mut parts = std::iter::once(path_root.as_str())
+                        .chain(file.split('/').filter(|p| !p.is_empty()))
+                        .peekable();
 
-                    let next_idx = current_node.children().iter().position(|child| {
-                        child.identifier().0 == *remote_id && child.identifier().1 == current_path
-                    });
+                    let mut current_item = &mut root_item;
+                    let mut current_path = String::new();
+                    while let Some(part) = parts.next() {
+                        // separate parts with /
+                        if !current_path.is_empty() {
+                            current_path.push('/');
+                        }
+                        // accumulate full path
+                        current_path.push_str(part);
 
-                    if let Some(index) = next_idx {
-                        current_node = current_node.child_mut(index).unwrap();
-                    } else {
-                        let is_leaf = current_path == *file;
-                        let new_item =
-                            TreeItem::new_leaf((*remote_id, current_path.clone(), is_leaf), part);
-                        current_node.add_child(new_item).unwrap();
-                        current_node = current_node
-                            .child_mut(current_node.children().len() - 1)
-                            .unwrap();
+                        // find existing child with matching path
+                        let next_idx = current_item.children().iter().position(|child| {
+                            child.identifier().0 == *remote_id
+                                && child.identifier().1 == current_path
+                        });
+
+                        if let Some(index) = next_idx {
+                            // item exists, recurse
+                            current_item = current_item.child_mut(index).unwrap();
+                        } else {
+                            // item does not exist, create a new item
+                            let is_leaf = parts.peek().is_none();
+                            let new_item = TreeItem::new_leaf(
+                                (*remote_id, current_path.clone(), is_leaf),
+                                part,
+                            );
+
+                            // recurse
+                            current_item.add_child(new_item).unwrap();
+                            current_item = current_item
+                                .child_mut(current_item.children().len() - 1)
+                                .unwrap();
+                        }
                     }
                 }
             }
 
-            tree_items.push(root);
+            tree_items.push(root_item);
         }
 
         // tree widget

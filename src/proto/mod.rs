@@ -43,9 +43,8 @@ use tokio::sync::{
 pub struct ProtocolState {
     pub peers: Vec<NodeId>,
     pub group: Option<ProtocolGroupState>,
-    pub library_roots: Vec<PathBuf>,
-    pub library_files: BTreeSet<String>,
-    pub remote_files: HashMap<NodeId, Vec<String>>,
+    pub local_files: HashMap<String, BTreeSet<String>>,
+    pub remote_files: HashMap<NodeId, HashMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,9 +67,8 @@ pub struct Protocol {
 
     sync_peers: Arc<Mutex<HashMap<NodeId, sync::Peer>>>, // TODO: remove arc
 
-    library_roots: Mutex<Vec<PathBuf>>,
-    library_files: Mutex<BTreeSet<String>>,
-    remote_files: Mutex<HashMap<NodeId, Vec<String>>>,
+    local_files: Mutex<HashMap<String, BTreeSet<String>>>,
+    remote_files: Mutex<HashMap<NodeId, HashMap<String, Vec<String>>>>,
 
     audio: Audio,
 }
@@ -82,7 +80,7 @@ pub enum ProtocolEvent {
     SyncConnection(iroh::endpoint::Connection),
     SyncMessages(Vec<SignedMessage<Operation>>),
 
-    RemoteFiles(NodeId, Vec<String>),
+    RemoteFiles(NodeId, HashMap<String, Vec<String>>),
 }
 
 impl Protocol {
@@ -123,8 +121,7 @@ impl Protocol {
 
             sync_peers,
 
-            library_roots: Mutex::new(vec![]),
-            library_files: Mutex::new(BTreeSet::new()),
+            local_files: Mutex::new(HashMap::new()),
             remote_files: Mutex::new(HashMap::new()),
 
             audio,
@@ -228,13 +225,9 @@ impl Protocol {
             })
         };
 
-        let library_roots = {
-            let library_roots = self.library_roots.lock().await;
-            library_roots.clone()
-        };
-        let library_files = {
-            let library_files = self.library_files.lock().await;
-            library_files.clone()
+        let local_files = {
+            let local_files = self.local_files.lock().await;
+            local_files.clone()
         };
         let remote_files = {
             let remote_files = self.remote_files.lock().await;
@@ -244,8 +237,7 @@ impl Protocol {
         Ok(ProtocolState {
             peers,
             group,
-            library_roots,
-            library_files,
+            local_files,
             remote_files,
         })
     }
@@ -269,7 +261,7 @@ impl Protocol {
             let group = group.as_mut().ok_or(anyhow::anyhow!("not in a group"))?;
 
             let message = group.add_member(node_id);
-            self.broadcast_messages(&[message]).await?;
+            self.broadcast_acb_messages(&[message]).await?;
 
             group.evaluate_members()
         };
@@ -285,7 +277,7 @@ impl Protocol {
             let group = group.as_mut().ok_or(anyhow::anyhow!("not in a group"))?;
 
             let message = group.remove_member(node_id);
-            self.broadcast_messages(&[message]).await?;
+            self.broadcast_acb_messages(&[message]).await?;
 
             group.evaluate_members()
         };
@@ -563,11 +555,14 @@ impl Protocol {
         let cancel_token = peer.cancel_token.clone();
 
         // send local files
-        let library_files = {
-            let library_files = self.library_files.lock().await;
-            library_files.iter().cloned().collect()
+        let local_files = {
+            let local_files = self.local_files.lock().await;
+            local_files
+                .iter()
+                .map(|(root, files)| (root.clone(), files.iter().cloned().collect()))
+                .collect()
         };
-        peer.send(sync::Message::FileList(library_files));
+        peer.send(sync::Message::Library(local_files));
 
         // TODO: initiate sync w known remote_clock from handshake
 
@@ -592,8 +587,8 @@ impl Protocol {
                             app_log!("unexpected message");
                         }
 
-                        sync::Message::FileList(files) => {
-                            app_log!("[proto] [-> {node_id}] received list of {} local files", files.len());
+                        sync::Message::Library(files) => {
+                            app_log!("[proto] [-> {node_id}] received remote files");
                             self.tx.send(ProtocolEvent::RemoteFiles(node_id, files)).unwrap();
                         }
                     }
@@ -650,17 +645,24 @@ impl Protocol {
         }
     }
 
-    async fn broadcast_messages(
-        &self,
-        messages: &[SignedMessage<Operation>],
-    ) -> anyhow::Result<()> {
+    async fn broadcast_message(&self, message: &sync::Message) -> anyhow::Result<()> {
         let peers = self.sync_peers.lock().await;
 
         for (_peer_id, peer) in peers.iter() {
-            peer.send(sync::Message::Sync {
-                messages: messages.to_vec(),
-            });
+            peer.send(message.clone());
         }
+
+        Ok(())
+    }
+
+    async fn broadcast_acb_messages(
+        &self,
+        messages: &[SignedMessage<Operation>],
+    ) -> anyhow::Result<()> {
+        let message = sync::Message::Sync {
+            messages: messages.to_vec(),
+        };
+        self.broadcast_message(&message).await?;
 
         Ok(())
     }
@@ -695,22 +697,13 @@ impl Protocol {
         Ok(())
     }
 
-    async fn add_library_root(self: &Arc<Self>, path: PathBuf) -> anyhow::Result<()> {
-        // add to roots list
-        {
-            let mut library_roots = self.library_roots.lock().await;
-            if library_roots.contains(&path) {
-                anyhow::bail!("already a library root");
-            }
-            library_roots.push(path.clone());
-        }
+    async fn add_library_root(self: &Arc<Self>, root_path: PathBuf) -> anyhow::Result<()> {
+        app_log!("[library] scanning {root_path:?}");
 
-        app_log!("[library] scanning {path:?}");
-
-        let mut files = Vec::new();
+        let mut files = BTreeSet::new();
 
         let pattern = {
-            let mut p = path.to_string_lossy().into_owned();
+            let mut p = root_path.to_string_lossy().into_owned();
             p.push_str("/**/*.*");
             p
         };
@@ -719,7 +712,11 @@ impl Protocol {
         for entry in glob::glob(&pattern).context("failed to read glob pattern")? {
             match entry {
                 Ok(path) => {
-                    files.push(path.to_string_lossy().into_owned());
+                    let path = path.to_string_lossy();
+                    let short_path = path
+                        .strip_prefix(root_path.to_string_lossy().as_ref())
+                        .unwrap();
+                    files.insert(short_path.to_string());
                 }
                 Err(e) => {
                     app_log!("[library] error scanning: {e:#}");
@@ -729,11 +726,22 @@ impl Protocol {
 
         app_log!("[library] found {} files", files.len());
 
-        // extend list
+        // update list
         {
-            let mut library_files = self.library_files.lock().await;
-            library_files.extend(files);
-    }
+            let mut local_files = self.local_files.lock().await;
+            local_files.insert(root_path.to_string_lossy().into_owned(), files);
+        }
+
+        // broadcast
+        let local_files = {
+            let local_files = self.local_files.lock().await;
+            local_files
+                .iter()
+                .map(|(root, files)| (root.clone(), files.iter().cloned().collect()))
+                .collect()
+        };
+        self.broadcast_message(&sync::Message::Library(local_files))
+            .await?;
 
         Ok(())
     }

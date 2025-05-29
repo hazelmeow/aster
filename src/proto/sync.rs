@@ -9,6 +9,7 @@ use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver, UnboundedSender},
     oneshot,
@@ -18,7 +19,7 @@ use tokio_util::{
     sync::CancellationToken,
 };
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     Handshake {
         group_id: u64,
@@ -34,7 +35,7 @@ pub enum Message {
         messages: Vec<SignedMessage<Operation>>,
     },
 
-    FileList(Vec<String>),
+    Library(HashMap<String, Vec<String>>),
 }
 
 struct StreamOpen(oneshot::Sender<anyhow::Result<(SendStream, RecvStream)>>);
