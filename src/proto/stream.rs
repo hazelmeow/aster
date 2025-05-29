@@ -86,8 +86,6 @@ pub async fn connect_stream(
     Ok((init_res.content_length, Box::pin(stream)))
 }
 
-const TEST_FILE: &[u8; 77184] = include_bytes!("../../test.mp3");
-
 /// Handles the accept end of a content stream.
 pub async fn accept_stream(
     mut send_stream: SendStream,
@@ -103,8 +101,18 @@ pub async fn accept_stream(
     let init_req: InitRequest =
         postcard::from_bytes(&init_req_buf).context("failed to deserialize init request")?;
 
-    // TODO: read actual content length
-    let content_length = 77184;
+    // open file
+    // TODO: ensure path is within library roots
+    let mut file = File::open(&init_req.file_path)
+        .await
+        .context("failed to open file")?;
+
+    // get file length
+    let metadata = file
+        .metadata()
+        .await
+        .context("failed to read file metadata")?;
+    let content_length = metadata.len();
 
     // send init response
     let init_res = InitResponse { content_length };
@@ -129,17 +137,14 @@ pub async fn accept_stream(
         end_pos
     );
 
-    // open reader
-    let mut rdr = BufReader::new(Cursor::new(TEST_FILE));
-
     // seek reader if not starting from 0
     if start_pos != 0 {
-        rdr.seek(std::io::SeekFrom::Start(start_pos)).await?;
+        file.seek(std::io::SeekFrom::Start(start_pos)).await?;
     }
 
     // read until end_pos
     let len = end_pos - start_pos;
-    let mut rdr = rdr.take(len);
+    let mut rdr = file.take(len);
 
     // copy reader to stream
     tokio::io::copy(&mut rdr, &mut send_stream).await?;
