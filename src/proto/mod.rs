@@ -10,7 +10,7 @@ pub(crate) mod sync;
 use crate::{
     app::app_log,
     profile::Profile,
-    proto::{clock::Clock, join::JoinProtocol, stream::ProtocolStream, sync::SyncProtocol},
+    proto::{clock::Clock, join::JoinProtocol, stream::{LocalStream, ProtocolStream}, sync::SyncProtocol},
 };
 use acb::{CausalBroadcast, SignedMessage};
 use anyhow::Context;
@@ -658,18 +658,25 @@ impl Protocol {
         peer_id: NodeId,
         file_path: String,
     ) -> anyhow::Result<()> {
-        if peer_id == self.router.endpoint().node_id() {
-            anyhow::bail!("local files not implemented");
-            }
+        let mut reader = if peer_id == self.router.endpoint().node_id() {
+            app_log!("[playback] streaming local file {file_path}");
 
-        app_log!("downloading {file_path} from {peer_id}");
+            StreamDownload::new::<LocalStream>(
+                file_path,
+                TempStorageProvider::new(),
+                stream_download::Settings::default(),
+            )
+            .await?
+        } else {
+            app_log!("[playback] streaming remote file {file_path} from {peer_id}");
 
-        let mut reader = StreamDownload::new::<ProtocolStream>(
+            StreamDownload::new::<ProtocolStream>(
             (self.clone(), peer_id, file_path),
             TempStorageProvider::new(),
             stream_download::Settings::default(),
         )
-        .await?;
+            .await?
+        };
 
         tokio::task::spawn_blocking(move || {
             use std::io::Read;

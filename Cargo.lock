@@ -136,6 +136,7 @@ dependencies = [
  "iroh-base",
  "log",
  "n0-future",
+ "pin-project-lite",
  "postcard",
  "rand 0.8.5",
  "ratatui",

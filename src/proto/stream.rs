@@ -13,16 +13,20 @@
 
 use crate::{app::app_log, proto::Protocol};
 use anyhow::Context;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use futures::{Stream, TryStreamExt};
 use iroh::{
     NodeId,
     endpoint::{RecvStream, SendStream},
 };
+use pin_project_lite::pin_project;
 use serde::{Deserialize, Serialize};
-use std::{io::Cursor, pin::Pin, sync::Arc};
+use std::{io::Cursor, pin::Pin, sync::Arc, task::Poll};
 use stream_download::source::{DecodeError, SourceStream};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use tokio::{
+    fs::File,
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InitRequest {
@@ -245,6 +249,109 @@ impl SourceStream for ProtocolStream {
 
     async fn reconnect(&mut self, current_position: u64) -> std::io::Result<()> {
         self.seek_range(current_position, None).await
+    }
+
+    fn supports_seek(&self) -> bool {
+        true
+    }
+}
+
+pin_project! {
+    #[derive(Debug)]
+    pub struct LocalStream {
+        file_path: String,
+        content_length: u64,
+
+        buf: BytesMut,
+
+        // this value is `None` if the stream has terminated.
+        #[pin]
+        file: Option<File>,
+    }
+}
+
+// stream implementation borrowed from tokio_util::io::ReaderStream
+impl Stream for LocalStream {
+    type Item = std::io::Result<Bytes>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let mut this = self.as_mut().project();
+
+        let file = match this.file.as_pin_mut() {
+            Some(r) => r,
+            None => return Poll::Ready(None),
+        };
+
+        match tokio_util::io::poll_read_buf(file, cx, &mut this.buf) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(err)) => {
+                self.project().file.set(None);
+                Poll::Ready(Some(Err(err)))
+            }
+            Poll::Ready(Ok(0)) => {
+                self.project().file.set(None);
+                Poll::Ready(None)
+            }
+            Poll::Ready(Ok(_)) => {
+                let chunk = this.buf.split();
+                Poll::Ready(Some(Ok(chunk.freeze())))
+            }
+        }
+    }
+}
+
+impl SourceStream for LocalStream {
+    type Params = String;
+    type StreamCreationError = StreamDownloadError;
+
+    async fn create(file_path: Self::Params) -> Result<Self, Self::StreamCreationError> {
+        // open file
+        let file = File::open(&file_path)
+            .await
+            .context("failed to open file")?;
+
+        // get length
+        let metadata = file
+            .metadata()
+            .await
+            .context("failed to read file metadata")?;
+        let content_length = metadata.len();
+
+        Ok(Self {
+            file_path,
+            content_length,
+            buf: BytesMut::with_capacity(4096),
+            file: Some(file),
+        })
+    }
+
+    fn content_length(&self) -> Option<u64> {
+        Some(self.content_length)
+    }
+
+    async fn seek_range(&mut self, start: u64, _end: Option<u64>) -> std::io::Result<()> {
+        // seek file if not finished
+        if let Some(file) = &mut self.file {
+            file.seek(std::io::SeekFrom::Start(start)).await?;
+        }
+        Ok(())
+    }
+
+    async fn reconnect(&mut self, current_position: u64) -> std::io::Result<()> {
+        // open file
+        let mut file = File::open(&self.file_path).await?;
+
+        // seek
+        file.seek(std::io::SeekFrom::Start(current_position))
+            .await?;
+
+        // replace file
+        self.file = Some(file);
+
+        Ok(())
     }
 
     fn supports_seek(&self) -> bool {
