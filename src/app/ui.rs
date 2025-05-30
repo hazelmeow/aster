@@ -230,7 +230,7 @@ impl<'a> App<'a> {
         let mut lines = vec![
             Line::from(vec![
                 "Profile: ".into(),
-                self.profile.name().unwrap_or("None").yellow(),
+                self.profile_name.as_deref().unwrap_or("None").yellow(),
             ]),
             Line::from(vec![
                 "Node ID: ".into(),

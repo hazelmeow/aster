@@ -23,7 +23,7 @@ pub struct App<'a> {
     pub running: bool,
     pub events: EventHandler,
 
-    pub profile: Profile,
+    pub profile_name: Option<String>,
     pub protocol: Arc<Protocol>,
 
     pub mode: AppMode,
@@ -80,6 +80,9 @@ pub(crate) use app_log;
 impl<'a> App<'a> {
     /// Constructs a new instance of [`App`].
     pub async fn new(profile_name: Option<String>) -> anyhow::Result<Self> {
+        // initialize as early as possible
+        let events = EventHandler::new();
+
         // load profile if named
         let profile = if let Some(profile_name) = &profile_name {
             Profile::load_or_create(profile_name).await?
@@ -87,21 +90,13 @@ impl<'a> App<'a> {
             Profile::new(None)
         };
 
-        // TODO
-        // save profile if named but not previously found
-        // if profile_name.is_some() {
-        // profile.save().await?;
-        // }
-
-        let protocol = Protocol::new(&profile).await?;
-
-        let events = EventHandler::new();
+        let protocol = Protocol::new(profile).await?;
 
         Ok(Self {
             running: true,
             events,
 
-            profile,
+            profile_name,
             protocol,
 
             mode: AppMode::default(),
@@ -134,6 +129,12 @@ impl<'a> App<'a> {
 
         // shut down protocol
         self.protocol.shutdown().await?;
+
+        // save profile
+        if let Some(profile_name) = &self.profile_name {
+            let profile = self.protocol.save_profile(profile_name).await?;
+            profile.save().await?;
+        }
 
         Ok(())
     }

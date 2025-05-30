@@ -1,11 +1,22 @@
+use crate::proto::{acb::SignedMessage, clock::Clock, dgm::Operation};
 use anyhow::Context as _;
 use iroh::SecretKey;
+use serde::{Deserialize, Serialize};
 
 /// Persisted data.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Profile {
-    name: Option<String>,
-    secret_key: SecretKey,
+    pub name: Option<String>,
+    pub secret_key: SecretKey,
+    pub library_roots: Vec<String>,
+    pub group: Option<ProfileGroup>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProfileGroup {
+    pub group_id: u64,
+    pub acb_clock: Clock,
+    pub acb_messages: Vec<SignedMessage<Operation>>,
 }
 
 impl Profile {
@@ -19,24 +30,21 @@ impl Profile {
         Self {
             name,
             secret_key: SecretKey::generate(rand::rngs::OsRng),
+            library_roots: Vec::new(),
+            group: None,
         }
     }
 
     pub async fn load(name: &str) -> anyhow::Result<Option<Self>> {
-        let base_path = format!("./data/{name}");
-        let secret_key_path = format!("{base_path}/secretkey.txt");
+        let data_path = format!("./data/{name}/profile.json");
 
-        if tokio::fs::try_exists(&secret_key_path).await? {
-            let secret_key_string = tokio::fs::read_to_string(secret_key_path)
+        if tokio::fs::try_exists(&data_path).await? {
+            let data = tokio::fs::read_to_string(data_path)
                 .await
                 .context("failed to read profile file")?;
-            let secret_key = secret_key_string
-                .parse()
-                .context("failed to parse profile file")?;
-            Ok(Some(Self {
-                name: Some(name.to_string()),
-                secret_key,
-            }))
+            let data = serde_json::from_str(&data).context("failed to parse profile file")?;
+
+            Ok(Some(data))
         } else {
             Ok(None)
         }
@@ -51,17 +59,10 @@ impl Profile {
         let base_path = format!("./data/{profile_name}");
         tokio::fs::create_dir_all(&base_path).await?;
 
-        let secret_key_path = format!("{base_path}/secretkey.txt");
-        tokio::fs::write(secret_key_path, self.secret_key.to_string()).await?;
+        let data_path = format!("{base_path}/profile.json");
+        let data = serde_json::to_vec(self).context("failed to serialize profile file")?;
+        tokio::fs::write(data_path, data).await?;
 
         Ok(())
-    }
-
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_ref().map(|s| s.as_str())
-    }
-
-    pub fn secret_key(&self) -> &SecretKey {
-        &self.secret_key
     }
 }

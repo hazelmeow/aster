@@ -1,6 +1,6 @@
-mod app;
-mod profile;
-mod proto;
+pub(crate) mod app;
+pub(crate) mod profile;
+pub(crate) mod proto;
 
 use crate::app::{App, AppLogger};
 
@@ -10,11 +10,11 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     // parse args
-    let mut profile = None;
+    let mut profile_name = None;
     match args.as_slice() {
         [] => {}
         [profile_arg] => {
-            profile = Some(profile_arg.clone());
+            profile_name = Some(profile_arg.clone());
         }
         _ => {
             println!("Couldn't parse command line arguments: {args:?}");
@@ -24,7 +24,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // initialize app
-    let app = App::new(profile).await?;
+    let app = App::new(profile_name).await?;
 
     // set up global logger
     let logger = AppLogger::new();

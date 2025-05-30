@@ -170,6 +170,7 @@ dependencies = [
  "ratatui",
  "rodio",
  "serde",
+ "serde_json",
  "stream-download",
  "tokio",
  "tokio-util",

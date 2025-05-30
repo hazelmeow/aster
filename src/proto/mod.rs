@@ -1,16 +1,16 @@
 //! Protocol logic.
 
-mod acb;
+pub(crate) mod acb;
 pub(crate) mod audio;
-mod clock;
-mod dgm;
+pub(crate) mod clock;
+pub(crate) mod dgm;
 pub(crate) mod join;
-mod stream;
+pub(crate) mod stream;
 pub(crate) mod sync;
 
 use crate::{
     app::app_log,
-    profile::Profile,
+    profile::{Profile, ProfileGroup},
     proto::{
         audio::AudioTrack,
         clock::Clock,
@@ -85,13 +85,13 @@ pub enum ProtocolEvent {
 }
 
 impl Protocol {
-    pub async fn new(profile: &Profile) -> anyhow::Result<Arc<Self>> {
+    pub async fn new(profile: Profile) -> anyhow::Result<Arc<Self>> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
         // create iroh endpoint
         let endpoint = iroh::Endpoint::builder()
             .discovery_n0()
-            .secret_key(profile.secret_key().clone())
+            .secret_key(profile.secret_key.clone())
             .bind()
             .await?;
 
@@ -111,6 +111,22 @@ impl Protocol {
         // create audio thread
         let audio = Audio::new()?;
 
+        // restore group state
+        let group = {
+            profile.group.map(|group| {
+                // initialize acb state
+                let acb = CausalBroadcast::from_messages(
+                    profile.secret_key,
+                    group.acb_clock,
+                    group.acb_messages,
+                );
+
+                // initialize group
+                GroupMembership::from_causal_broadcast(acb)
+            })
+        };
+
+        // create protocol struct
         let protocol = Arc::new(Self {
             router,
             sync,
@@ -118,7 +134,7 @@ impl Protocol {
 
             tx,
 
-            group: Mutex::new(None),
+            group: Mutex::new(group),
 
             sync_peers,
 
@@ -127,6 +143,29 @@ impl Protocol {
 
             audio,
         });
+
+        {
+            // if restoring group, deliver messages and reconcile conections
+            let mut group = protocol.group.lock().await;
+            if let Some(group) = group.as_mut() {
+                protocol.deliver_group_messages(group).await?;
+
+                let members = group.evaluate_members();
+                protocol.reconcile_group_members(members).await?;
+            }
+        }
+
+        // add library roots from profile
+        for library_root in profile.library_roots {
+            let Ok(parsed) = library_root.parse();
+
+            tokio::spawn({
+                let protocol = protocol.clone();
+                async move {
+                    protocol.add_library_root(parsed).await.unwrap();
+                }
+            });
+        }
 
         // handle protocol events
         tokio::spawn({
@@ -608,9 +647,9 @@ impl Protocol {
                         };
 
                         let res = stream::accept_stream(send_stream, recv_stream, library_roots).await;
-                            if let Err(e) = res {
-                                app_log!("error while serving stream: {e:#}");
-                            }
+                        if let Err(e) = res {
+                            app_log!("error while serving stream: {e:#}");
+                        }
                     });
                 }
 
@@ -702,10 +741,10 @@ impl Protocol {
             app_log!("[playback] streaming remote file {file_path} from {peer_id}");
 
             StreamDownload::new::<ProtocolStream>(
-            (self.clone(), peer_id, file_path),
-            TempStorageProvider::new(),
-            stream_download::Settings::default(),
-        )
+                (self.clone(), peer_id, file_path),
+                TempStorageProvider::new(),
+                stream_download::Settings::default(),
+            )
             .await?
         };
 
@@ -765,5 +804,28 @@ impl Protocol {
             .await?;
 
         Ok(())
+    }
+
+    pub async fn save_profile(self: &Arc<Self>, profile_name: &str) -> anyhow::Result<Profile> {
+        let group = {
+            let group = self.group.lock().await;
+            group.as_ref().map(|group| ProfileGroup {
+                group_id: group.group_id(),
+                acb_clock: group.acb.local_clock().clone(),
+                acb_messages: group.acb.received().cloned().collect(),
+            })
+        };
+
+        let library_roots = {
+            let local_files = self.local_files.lock().await;
+            local_files.keys().cloned().collect()
+        };
+
+        Ok(Profile {
+            name: Some(profile_name.to_owned()),
+            secret_key: self.router.endpoint().secret_key().clone(),
+            library_roots,
+            group,
+        })
     }
 }
