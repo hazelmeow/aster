@@ -296,40 +296,7 @@ impl<'a> App<'a> {
         match parts[0] {
             "q" => self.events.send(AppEvent::Exit),
 
-            // "c" => {
-            //     if parts.len() != 2 {
-            //         anyhow::bail!("expected 1 argument");
-            //     }
-
-            //     app_log!("connecting to {}", parts[1]);
-
-            //     let addr = NodeAddr::new(parts[1].parse().context("failed to parse node id")?);
-            //     let proto = self.proto.clone();
-            //     let router = self.router.clone();
-
-            //     tokio::spawn(async move {
-            //         proto.connect(router.endpoint(), addr).await.unwrap();
-            //     });
-            // }
-
-            // "b" => {
-            //     if parts.len() != 2 {
-            //         anyhow::bail!("expected 1 argument");
-            //     }
-
-            //     app_log!("broadcasting '{}'", parts[1]);
-
-            //     let proto = self.proto.clone();
-            //     let msg = parts[1].to_string();
-            //     tokio::spawn(async move {
-            //         let peers = proto.peers().clone();
-            //         let peers = peers.lock().await;
-            //         for (id, peer) in peers.iter() {
-            //             peer.send(crate::proto::Message::Text(msg.clone()))
-            //         }
-            //     });
-            // }
-            "cg" => {
+            "creategroup" | "cg" => {
                 app_log!("creating group");
 
                 let protocol = self.protocol.clone();
@@ -342,7 +309,7 @@ impl<'a> App<'a> {
                 });
             }
 
-            "j" => {
+            "joingroup" | "join" | "j" => {
                 if parts.len() != 2 {
                     anyhow::bail!("expected 1 argument");
                 }
@@ -372,7 +339,7 @@ impl<'a> App<'a> {
                 });
             }
 
-            "r" | "remove" => {
+            "remove" | "r" => {
                 if parts.len() != 2 {
                     anyhow::bail!("expected 1 argument");
                 }
@@ -411,11 +378,11 @@ impl<'a> App<'a> {
                 });
             }
 
-            "h" | "help" | "?" => {
+            "help" | "h" | "?" => {
                 app_send!(AppEvent::Screen(AppScreen::Help));
             }
 
-            "l" => {
+            "addlibrary" | "al" => {
                 if parts.len() != 2 {
                     anyhow::bail!("expected 1 argument");
                 }

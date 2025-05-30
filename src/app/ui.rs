@@ -232,6 +232,8 @@ impl<'a> App<'a> {
                 "Profile: ".into(),
                 self.profile_name.as_deref().unwrap_or("None").yellow(),
             ]),
+            Line::from(""),
+            Line::from("Network".bold()),
             Line::from(vec![
                 "Node ID: ".into(),
                 self.protocol
@@ -242,10 +244,32 @@ impl<'a> App<'a> {
                     .yellow(),
             ]),
             Line::from(vec!["Home Relay: ".into(), home_relay.yellow()]),
-            Line::from(""),
             Line::from(vec!["Connected Peers: ".into(), peers.yellow()]),
+            Line::from(""),
+            Line::from("Library".bold()),
         ];
 
+        // library help text if empty
+        if self.protocol_state.local_files.is_empty() {
+            lines.push(Line::from(vec![
+                "Empty, add a path using ".into(),
+                ":addlibrary <path>".blue(),
+            ]));
+        }
+
+        // library roots
+        lines.extend(self.protocol_state.local_files.iter().map(|(root, files)| {
+            Line::from(vec![
+                " - ".into(),
+                root.clone().blue(),
+                " (".green(),
+                files.len().to_string().green(),
+                ")".green(),
+            ])
+        }));
+
+        // group status
+        lines.extend_from_slice(&[Line::from(""), Line::from("Group".bold())]);
         if let Some(group) = &self.protocol_state.group {
             let mut group_members = group
                 .members
@@ -257,12 +281,17 @@ impl<'a> App<'a> {
             let group_members = group_members.join(", ");
 
             lines.extend_from_slice(&[
-                Line::from(""),
-                Line::from(vec!["Group ID: ".into(), group.id.to_string().yellow()]),
-                Line::from(vec!["Group Members: ".into(), group_members.yellow()]),
-                Line::from(""),
+                Line::from(vec!["ID: ".into(), group.id.to_string().yellow()]),
+                Line::from(vec!["Members: ".into(), group_members.yellow()]),
                 Line::from(vec!["Join Code: ".into(), group.join_code.clone().yellow()]),
             ]);
+        } else {
+            lines.extend_from_slice(&[Line::from(vec![
+                "None, create one using ".into(),
+                ":creategroup".blue(),
+                " or join one using ".into(),
+                ":join <join code>".blue(),
+            ])]);
         }
 
         let status_text = Text::from(lines);
@@ -470,13 +499,17 @@ impl<'a> App<'a> {
             Line::from("Group Management".bold()),
             Line::from(vec![
                 " - ".into(),
-                "`:cg`".blue(),
-                " to create a group.".into(),
+                ":creategroup".blue(),
+                " to create a group. (alias ".into(),
+                ":cg".blue(),
+                ")".into(),
             ]),
             Line::from(vec![
                 " - ".into(),
-                "`:join <join code>`".blue(),
-                " to join a group.".into(),
+                ":joingroup <join code>".blue(),
+                " to join a group. (alias ".into(),
+                ":join :j".blue(),
+                ")".into(),
             ]),
             Line::from(""),
             Line::from("Library Screen".bold()),
@@ -487,8 +520,10 @@ impl<'a> App<'a> {
             ]),
             Line::from(vec![
                 " - ".into(),
-                "`:l <path>`".blue(),
-                " to add a library root.".into(),
+                ":addlibrary <path>".blue(),
+                " to add a library root. (alias ".into(),
+                ":al".blue(),
+                ")".into(),
             ]),
             Line::from(""),
             Line::from("Playback".bold()),
