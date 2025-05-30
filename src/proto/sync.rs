@@ -118,8 +118,8 @@ impl iroh::protocol::ProtocolHandler for SyncProtocol {
 // return the receiver separately since it can't be cloned
 pub fn handle_connection_streams(
     connection: Connection,
-    mut send_stream: SendStream,
-    mut recv_stream: RecvStream,
+    send_stream: SendStream,
+    recv_stream: RecvStream,
 ) -> (
     Peer,
     UnboundedReceiver<Message>,
@@ -147,9 +147,18 @@ pub fn handle_connection_streams(
                     res = transport.next() => {
                         match res {
                             Some(Ok(bytes)) => {
-                                let msg: Message = postcard::from_bytes(&bytes).unwrap();
-                                // app_log!("[proto] got message from {node_id}: {msg:?}");
-                                recv_tx.send(msg).unwrap();
+                                let msg: Result<Message, _> = postcard::from_bytes(&bytes);
+                                match msg {
+                                    Ok(msg) => {
+                                        if let Err(e) = recv_tx.send(msg) {
+                                            app_log!("[proto] recv channel error: {e:#}");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        app_log!("[proto] recv decode error: {e:#}");
+                                    }
+                                }
+
                             }
                             Some(Err(e)) => {
                                 app_log!("[proto] recv stream error: {}", e.to_string());
@@ -184,9 +193,17 @@ pub fn handle_connection_streams(
                     res = send_rx.recv() => {
                         match res {
                             Some(msg) => {
-                                // app_log!("[proto] sending message to {node_id}: {msg:?}");
-                                let buf = postcard::to_stdvec(&msg).unwrap();
-                                transport.send(buf.into()).await.unwrap();
+                                let buf: Result<Vec<u8>, _> = postcard::to_stdvec(&msg);
+                                match buf {
+                                    Ok(buf) => {
+                                        if let Err(e) = transport.send(buf.into()).await {
+                                            app_log!("[proto] send stream error: {e:#}");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        app_log!("[proto] send encode error: {e:#}");
+                                    }
+                                }
                             }
                             None => {
                                 // channel closed
