@@ -29,6 +29,7 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
+    time::Duration,
 };
 use stream_download::{StreamDownload, storage::temp::TempStorageProvider};
 use sync::StreamAccept;
@@ -36,6 +37,8 @@ use tokio::sync::{
     Mutex,
     mpsc::{UnboundedReceiver, UnboundedSender},
 };
+
+const RECONNECT_PEERS_INTERVAL: Duration = Duration::from_secs(60);
 
 /// View of protocol state for UI.
 ///
@@ -166,6 +169,28 @@ impl Protocol {
                 }
             });
         }
+
+        // periodically reconnect to group members
+        tokio::spawn({
+            let protocol = protocol.clone();
+            async move {
+                let mut interval = tokio::time::interval(RECONNECT_PEERS_INTERVAL);
+                loop {
+                    interval.tick().await;
+
+                    let group = protocol.group.lock().await;
+                    let members = if let Some(group) = group.as_ref() {
+                        group.evaluate_members()
+                    } else {
+                        continue;
+                    };
+
+                    if let Err(e) = protocol.reconcile_group_members(members).await {
+                        app_log!("error reconnceting to peers: {e:#}");
+                    }
+                }
+            }
+        });
 
         // handle protocol events
         tokio::spawn({
