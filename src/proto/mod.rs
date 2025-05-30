@@ -797,6 +797,16 @@ impl Protocol {
         for entry in glob::glob(&pattern).context("failed to read glob pattern")? {
             match entry {
                 Ok(path) => {
+                    // check extension
+                    let ext = path.extension().map(|e| e.to_string_lossy());
+                    match ext.as_ref().map(|e| e.as_ref()) {
+                        Some(
+                            "mp3" | "wav" | "aac" | "flac" | "ogg" | "oga" | "opus" | "m4a"
+                            | "alac" | "wma",
+                        ) => {}
+                        _ => continue,
+                    }
+
                     let path = path.to_string_lossy();
                     let short_path = path
                         .strip_prefix(root_path.to_string_lossy().as_ref())
