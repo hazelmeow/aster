@@ -173,6 +173,3 @@ impl Audio {
         let _ = self.tx.send(AudioCommand::Seek(10.0));
     }
 }
-
-// TODO: tokio task to periodically send poll message, sends state to protocol/app
-// TODO: ui/controls
