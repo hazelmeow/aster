@@ -2,6 +2,8 @@
 
 Local-first peer-to-peer music streaming prototype.
 
+![Demo screenshot](demo.jpg)
+
 ## Usage
 
 Running the application:
